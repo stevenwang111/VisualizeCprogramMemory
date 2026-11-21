@@ -28,6 +28,13 @@ import sys
 import zipfile
 from pathlib import Path
 
+# GitHub Actions 的 Windows runner 默认 stdout/stderr 编码是 cp1252，
+# 直接 print 中文会抛 UnicodeEncodeError（编译其实已经成功，挂在日志上）。
+# 强制切到 UTF-8；errors="replace" 作为兜底，保证任何环境都不会因日志崩掉。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = Path(__file__).resolve().parent          # tools/
 ROOT = HERE.parent                              # 项目根（放 cdbg.py 的地方）
 

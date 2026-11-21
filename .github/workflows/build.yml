@@ -56,6 +56,8 @@ jobs:
     needs: check
     if: needs.check.outputs.should_build == 'true'
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8   # runner 默认 cp1252，中文日志会抛 UnicodeEncodeError
     steps:
       - uses: actions/checkout@v4
 
