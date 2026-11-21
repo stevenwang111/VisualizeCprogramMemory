@@ -119,15 +119,6 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 
 ![程序等待输入时的提示](docs/images/input.png)
 
-  > **TODO**（等主要功能稳定后再做）：补上 Dev-C++ 跑程序时的那种收尾提示
-  > ```
-  > --------------------------------
-  > Process exited after 8.978 seconds with return value 0
-  > 请按任意键继续. . .
-  > ```
-  > 做法是另外挂一个 `AttachConsole` 到被调试进程的保活进程守着那个控制台，
-  > 程序退出后由它打印这两行并等一次按键。
-
 ### 多种启动方式
 
 1. **命令行**：`python cdbg.py hello.c`
@@ -306,108 +297,6 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 
 ---
 
-## 目录结构
-
-```
-cdbg/
-├─ cdbg.py                    主入口：编译 → 起 GDB → 起 Web → 开浏览器
-├─ cdbg/
-│  ├─ launcher.py             编译流程、ASCII 工作目录管理
-│  ├─ instrument.py           源码插桩（堆跟踪）
-│  ├─ gdb_session.py          MI2 会话管理、命令收发
-│  ├─ gdb_probe.py            嵌入 GDB 的采集脚本（变量/栈帧/内存/段）
-│  ├─ collector.py            采集结果 → Snapshot 的聚合层
-│  ├─ memmap.py               外部进程内存布局（堆/栈真实边界）
-│  ├─ heap_ledger.py          堆账本解析
-│  ├─ curriculum.py           教材知识点映射（提示文案的唯一来源）
-│  ├─ snapshot.py             数据模型
-│  ├─ session.py              调试会话编排
-│  ├─ web_server.py           HTTP + REST + SSE
-│  └─ browser.py              打开浏览器
-├─ web/                       前端（纯静态，无构建步骤）
-│  ├─ index.html  theme.css
-│  ├─ app.js                  主逻辑与状态管理
-│  ├─ memview.js              HEX 网格、变量着色、指针连线
-│  ├─ sourceview.js           源码面板
-│  ├─ varpanel.js             变量卡片、调用栈
-│  └─ timeline.js             快照时间轴与变量 diff
-├─ shim/                      堆跟踪插桩的 shim 头与实现
-├─ examples/                  各章示例程序
-└─ tests/                     端到端测试
-```
-
----
-
-## 实现要点
-
-### 为什么是「附加调试器」而不是 attach
-
-GDB 在 Windows 上 attach 到已有进程会被系统拒绝（`error 5`，Access Denied）。
-所以 cdbg 采用 **launch 模式**：由 cdbg 启动被调试程序，然后全程伴随它运行。
-这和 IDE 里「用调试器启动程序」是同一件事。
-
-### 执行控制与数据采集为什么分开
-
-- **执行控制**用 GDB 的 **MI2 协议**（`-exec-run` / `-exec-next` / `-break-insert`）
-- **数据采集**用 **GDB 内嵌的 Python 探针**
-
-两者通过一个约定好的 JSON 文件解耦：程序每次停下来，探针就把快照原子写入文件，
-主进程读文件。这样避免 MI 与 console 解释器混用导致的输出交错。
-
-### 源码插桩安全吗
-
-堆跟踪会在源码里插入**一行** `#include "cdbg_shim.h"`，用户代码一行不改。
-安全上有五重保障：
-
-1. shim 头里**先 include 标准库、再定义宏** —— 不会被宏污染到声明
-2. 插入点选在**最后一个 `#include` 之后** —— 标准库头都已加载完毕
-3. 检测到用户**自己定义了 malloc / free** 时直接放弃插桩
-4. 插桩后**编译失败会自动降级**为不插桩重编一次
-5. 插桩只做「记录」，**不改变任何内存布局或执行顺序**
-
-### 几个必须知道的坑（都已在代码里处理）
-
-- **GDB 在中文路径下会直接崩溃**（内部用 GBK 解码 Unicode）。
-  所以源码一律复制到纯 ASCII 的临时工作目录再编译，界面仍显示原始路径。
-- **Windows 上真实地址顺序与教科书相反** —— 代码段在高位（`0x7FF6…`），
-  栈在低位（`0x5FF8…`），而经典示意图是代码段在低位。
-  界面因此按**教材逻辑顺序**分区（程序段 → 全局静态 → 堆 → 栈），
-  但每个区块都标注真实地址，可切换成「按真实地址」排序。
-- **`%p` 的输出格式**是 16 位大写十六进制、无 `0x` 前缀，而 GDB 用
-  `0x00007ff6…`。界面统一成 `0x` + 大写，并另外提供 printf 形式对照。
-- **Windows 上 GDB 拿不到进程内存布局** —— `info proc mappings` 无输出，
-  `inferior.memory_regions()` 不存在。堆栈的真实边界改用
-  `VirtualQueryEx` 从进程外部查询。
-- **断点会「吸附」，不会精确落在你点的那一行**。`break file:18` 实际是
-  「第 18 行之后第一个有机器码的位置」：空行、纯声明行（`int b;`）、
-  `static int c = 0;` 都会被跳过。所以界面上显示的断点、以及「运行到光标」
-  之后的光标位置，用的都是 GDB 回报的真实落点（`bkpt.line`），
-  否则会出现「断点点在 18 行、程序停在 19 行」的错层。
-- **函数里的 `static` 变量不在 GDB 的 global/static block 里** ——
-  它挂在函数自己的 block 上，顺着 block 链往上走也拿不到。这类变量
-  只能从当前栈帧的可见变量里认出来，再按地址归到 `.data` / `.bss`
-  （未初始化的 `static` 在 `.bss`）。不补这一路，变量面板有地址、
-  内存视图却是空的。
-
----
-
-## 测试
-
-```bash
-python tests/test_e2e.py              # 端到端：指针指向、递归栈帧
-python tests/test_batch.py            # 批量测 examples/
-python tests/test_batch.py D:/cdesign # 批量测任意目录
-```
-
-批量测试对每个源文件走四关：**编译 → 启动 → 停在 main → 采集到变量信息**。
-源程序本身有编译错误时，只要工具能定位到出错位置（文件/行号/原因），
-就算它工作正常 —— 源程序的错不是工具的错。
-
-已验证：`D:/cdesign` 下 54 个自写程序全部通过（其中 3 个源程序本身
-有编译错误，被准确诊断并定位到行）。
-
----
-
 ## 已知限制
 
 - 目前只支持 Windows（内存布局采集用了 `VirtualQueryEx`）
@@ -419,28 +308,10 @@ python tests/test_batch.py D:/cdesign # 批量测任意目录
 
 ---
 
-## 计划中（TODO）
-
-> 以下是还没做的想法，不是当前功能。
-
-- **两种发布包**：现在只有免安装的 `cdbg-windows-x64.zip`（不带编译器，用本机的
-  gcc/gdb）。打算再出一个 **with runtime** 版本，把 MinGW-w64 的 gcc 和 gdb
-  一起打进去，解压就能调试，不用先装编译器；原本那个改叫 **without runtime**，
-  体积小，给已经配好环境的人用。
-- **编译器不合适时自动补一套**：without runtime 版如果发现本机只有 MSVC
-  （Visual Studio 的 `cl.exe`），要能自己拉取一份 MinGW 放到本地再用。原因是
-  MSVC 产出的是 PDB 调试信息，GDB 读不了——用它编译的程序看不到变量、行号和
-  调用栈，等于没调试。拉取的文件要有哈希校验，考虑到国内下载慢，还得支持镜像源。
-- 内置 gcc/gdb 属于把两个 GPL v3 程序和你自己的程序打包分发，是 GPL 说的
-  "mere aggregation"（单纯聚合），**不要求本项目也改成 GPL**。MIT 保持不变；
-  但分发时要把 gcc/gdb 各自的许可证文本、版权声明和源码获取途径一并提供。
-
----
-
 ## 参与开发
 
 想改代码或接手维护，从 [`CONTRIBUTING.md`](CONTRIBUTING.md) 开始——环境、本地跑法、
-改代码的硬规矩、测试、云端构建都在那里；架构和已知的坑见 [`DEVREADME.md`](DEVREADME.md)。
+架构、改代码的硬规矩、测试、云端构建都在那里。还没做的想法记在 [`TODO.md`](TODO.md)。
 
 ## 许可证与致谢
 
