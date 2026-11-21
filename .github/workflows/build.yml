@@ -78,6 +78,25 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: 发布 alpha 测试版到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: alpha
+          ASSET: build_out/cdbg-windows-x64.zip
+          SHA: ${{ needs.check.outputs.head_sha }}
+        shell: bash
+        run: |
+          TITLE="cdbg alpha (测试版) · ${SHA:0:7}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 已有 alpha release：只覆盖资产和标题，不动 changelog（留给用户以后自己填）
+            gh release upload "$TAG" "$ASSET" --clobber
+            gh release edit "$TAG" --title "$TITLE" --prerelease
+            echo "已更新 alpha release 的资产 (${SHA:0:7})"
+          else
+            gh release create "$TAG" "$ASSET" --title "$TITLE" --notes "" --prerelease
+            echo "已创建 alpha release (${SHA:0:7})"
+          fi
+
       - name: 记录本次构建到的 commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
