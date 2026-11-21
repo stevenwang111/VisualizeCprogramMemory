@@ -419,6 +419,24 @@ python tests/test_batch.py D:/cdesign # 批量测任意目录
 
 ---
 
+## 计划中（TODO）
+
+> 以下是还没做的想法，不是当前功能。
+
+- **两种发布包**：现在只有免安装的 `cdbg-windows-x64.zip`（不带编译器，用本机的
+  gcc/gdb）。打算再出一个 **with runtime** 版本，把 MinGW-w64 的 gcc 和 gdb
+  一起打进去，解压就能调试，不用先装编译器；原本那个改叫 **without runtime**，
+  体积小，给已经配好环境的人用。
+- **编译器不合适时自动补一套**：without runtime 版如果发现本机只有 MSVC
+  （Visual Studio 的 `cl.exe`），要能自己拉取一份 MinGW 放到本地再用。原因是
+  MSVC 产出的是 PDB 调试信息，GDB 读不了——用它编译的程序看不到变量、行号和
+  调用栈，等于没调试。拉取的文件要有哈希校验，考虑到国内下载慢，还得支持镜像源。
+- 内置 gcc/gdb 属于把两个 GPL v3 程序和你自己的程序打包分发，是 GPL 说的
+  "mere aggregation"（单纯聚合），**不要求本项目也改成 GPL**。MIT 保持不变；
+  但分发时要把 gcc/gdb 各自的许可证文本、版权声明和源码获取途径一并提供。
+
+---
+
 ## 参与开发
 
 想改代码或接手维护，从 [`CONTRIBUTING.md`](CONTRIBUTING.md) 开始——环境、本地跑法、

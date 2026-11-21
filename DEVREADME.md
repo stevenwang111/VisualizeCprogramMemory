@@ -297,3 +297,40 @@ node ui_forcekill_test.js http://127.0.0.1:8779/ # 程序卡在 scanf 时长按�
 3. 想看内存数据结构，在 `snapshot.py` 打断点（`collector.py` 是填值的地方）；
 4. 想看执行控制，在 `session.command()` 和 `GdbSession` 的命令收发处打断点；
 5. 动前端前先看 `app.js` 的 `state` 和 `updateChrome()`，绝大部分界面异常都从这两个地方查起。
+
+---
+
+## 10. TODO：双运行时发布 + 编译器不可用时的自动补装
+
+> 还没实现，这里是留给下一位维护者的设计备忘。许可证维持 MIT，不要改。
+
+**背景**：当前云编译只产出不带编译器的免安装包（`tools/build_standalone.py`），
+运行时靠 `compiler_scanner.py` 扫本机的 gcc/gdb。这有两个问题：
+
+1. 新手机器上可能一个 gcc 都没有 → 需要 **with runtime** 包（内置一套 MinGW-w64）。
+2. 装了 Visual Studio 的机器会扫到 `cl.exe`（MSVC）。`compiler_scanner.py` 目前
+   把它当合法候选（`_detect_family` 认 `cl.exe`，第 408、424 行），但 **MSVC 产出
+   PDB 调试信息，GDB 只认 DWARF**（且有 GCC Runtime Library Exception 的区别）。
+   选了 MSVC 编译出来的 exe 放进 cdbg：能编译、能启动，但变量/行号/调用栈全空。
+   这不是"不支持某些特性"，是调试信息格式根本对不上。
+
+**要做的事**：
+
+- 发布两种包：`cdbg-windows-x64-with-runtime.zip`（gcc + gdb 一起打进去，
+  解压即用）和 `cdbg-windows-x64.zip`（保持现状）。共用同一套构建脚本，
+  用参数切换是否 include 工具链目录；CI 里两个 artifact 都上传。
+- 工具链目录里 **gdb 必须带 Python 支持**（`gdb --batch -ex "python print(1)"`
+  能打印才算合格），否则 `gdb_probe.py` 加载不了，界面一个变量都没有。
+- without runtime 版增加"编译器不可用"判定：扫到的候选里只有 MSVC、或者
+  gdb 不带 Python 支持时，不要直接拿它编译，而是进入补装流程。
+- 补装流程：拉取一份 MinGW-w64（gcc + gdb）到本地固定目录
+  （建议 `%LOCALAPPDATA%\cdbg\toolchain\`，别写进程序目录，避免 UAC 和
+  每次解压被覆盖），校验哈希，然后调用现有的 `write_config` 把路径写进
+  `config/toolchain.conf`，下次启动直接复用。要考虑国内下载慢 → 支持镜像源、
+  断点续传、失败重试；下载控件不要引第三方库（本项目坚持纯标准库）。
+- `_detect_family` 对 MSVC 的处理要重新想：要么直接把它从候选里摘掉，
+  要么只在"没有别的可用编译器"时留作占位并触发挥发补装，别让它被静默选中。
+- **许可证义务**：内置 gcc/gdb 是 GPL v3 程序的分发，属于 mere aggregation，
+  本项目 MIT 不受影响；但 with runtime 包里必须附带 gcc/gdb 的 GPL 文本、
+  版权声明和**对应源码的获取途径**（官方源码 URL + 具体版本号即可），
+  学生的 `.c` 经 gcc 编译出的程序受 GCC Runtime Library Exception 保护，不用开源。
