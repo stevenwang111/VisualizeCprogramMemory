@@ -53,14 +53,14 @@ set CDBG_GDB=C:\msys64\ucrt64\bin\gdb.exe
 ## 常用命令
 
 ```bash
-python cdbg.py prog.c                # 编译并打开可视化界面
-python cdbg.py prog.exe              # 调试已编译好的程序
-python cdbg.py prog.c --no-browser   # 不自动开浏览器（自己访问打印的地址）
-python cdbg.py prog.c --no-instrument# 关闭堆跟踪插桩
-python cdbg.py prog.c --headless     # 终端输出模式，供 IDE 调用
-python cdbg.py prog.c --port 9000    # 指定端口（默认随机）
-python cdbg.py --toolchain           # 查看当前编译器 / 调试器
-python cdbg.py --scan-compiler       # 重新扫描并选择工具链
+python cdbg.py prog.c                 # 编译并打开可视化界面
+python cdbg.py prog.exe               # 调试已编译好的程序
+python cdbg.py prog.c --no-browser    # 不自动开浏览器（自己访问打印的地址）
+python cdbg.py prog.c --no-instrument # 关闭堆跟踪插桩
+python cdbg.py prog.c --headless      # 终端输出模式，供 IDE 调用
+python cdbg.py prog.c --port 9000     # 指定端口（默认随机）
+python cdbg.py --toolchain            # 查看当前编译器 / 调试器
+python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 ```
 
 界面快捷键（与 RedPanda Dev-C++ 一致）：
