@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cdbg · 操作日志查看器</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #14161a; color: #d7dae0;
+    font: 13px/1.6 "Cascadia Code", "Consolas", "Microsoft YaHei", monospace;
+    display: flex; flex-direction: column;
+  }
+  .bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; background: #1d2026; border-bottom: 1px solid #2c3038;
+  }
+  .bar h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; color: #eef0f4; }
+  .meta { color: #8b93a1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spacer { flex: 1 1 auto; }
+  button {
+    background: #2b6cb0; color: #fff; border: 0; border-radius: 5px;
+    padding: 5px 14px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #3182ce; }
+  label { color: #a9b0bc; font-size: 12px; white-space: nowrap; user-select: none; }
+  pre {
+    flex: 1 1 auto; margin: 0; padding: 14px 18px; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .l-session { color: #7dd3fc; }
+  .l-click   { color: #c4b5fd; }
+  .l-btn     { color: #fcd34d; }
+  .l-busy    { color: #6ee7b7; }
+  .l-file    { color: #fca5a5; }
+  .l-page    { color: #94a3b8; }
+  .err { color: #f87171; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <h1>操作日志</h1>
+    <span class="meta" id="meta">加载中…</span>
+    <span class="spacer"></span>
+    <label><input type="checkbox" id="auto" checked> 自动刷新</label>
+    <button id="refresh" type="button">刷新</button>
+  </div>
+  <pre id="log"></pre>
+
+<script>
+(function () {
+  'use strict';
+  var logEl  = document.getElementById('log');
+  var metaEl = document.getElementById('meta');
+  var autoEl = document.getElementById('auto');
+
+  function color(line) {
+    var m = /\[([A-Z]+)\]/.exec(line);
+    return m ? ' class="l-' + m[1].toLowerCase() + '"' : '';
+  }
+
+  function load() {
+    fetch('/api/oplog', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { logEl.textContent = '读取失败：' + (d.message || '未知错误'); return; }
+        metaEl.textContent = d.file + '   ·   ' + d.path;
+        if (!d.lines || !d.lines.length) {
+          logEl.textContent = '(暂无记录)';
+          return;
+        }
+        // 逐行拼 HTML，class 只来自日志自己的类型标记，内容做转义
+        var html = d.lines.map(function (line) {
+          var esc = String(line).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          return '<span' + color(line) + '>' + esc + '</span>';
+        }).join('\n');
+        logEl.innerHTML = html;
+        logEl.scrollTop = logEl.scrollHeight;
+      })
+      .catch(function (e) {
+        logEl.textContent = '读取失败：' + e;
+        logEl.className = 'err';
+      });
+  }
+
+  document.getElementById('refresh').addEventListener('click', load);
+  setInterval(function () { if (autoEl.checked) load(); }, 1500);
+  load();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cdbg · C 语言可视化调试器</title>
+<link rel="stylesheet" href="/theme.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">cdbg</span>
+    <span class="prog" id="prog-name">—</span>
+  </div>
+
+  <div class="controls">
+    <button id="btn-debug" class="btn primary" title="开始调试 (F5)">▶ 调试</button>
+    <button id="btn-next" class="btn" title="单步执行：不进入函数 (F7)">→ 单步执行</button>
+    <button id="btn-step" class="btn" title="单步进入函数 (F8)">↓ 单步进入</button>
+    <button id="btn-finish" class="btn" title="跳出当前函数 (Ctrl+F8)">↑ 跳出函数</button>
+    <button id="btn-goto" class="btn" title="运行到光标所在行 (Ctrl+F5)">⇥ 运行到光标</button>
+    <button id="btn-continue" class="btn" title="继续运行到下一个断点 (F4)">⏵ 继续</button>
+    <button id="btn-stop" class="btn danger holdable" title="停止执行 (F6)｜长按 3 秒 = 强制结束进程">■ 停止执行<span class="hold-fill"></span></button>
+    <button id="btn-restart" class="btn" title="从头重新运行">⟳ 重启</button>
+    <button id="btn-clear" class="btn ghost" title="清空界面：把这次调试看到的东西全清掉（源码和断点保留，程序会先停掉）">⌫ 清空界面</button>
+  </div>
+
+  <!-- 程序卡在 scanf 之类的阻塞调用上时，告诉用户该去控制台看一眼 -->
+  <span id="busy-hint" class="busy-hint" hidden>指令运行中，请检查程序是否在等待输入，如果是，请到控制台输入一些字符</span>
+
+  <div class="status">
+    <span id="status-loc" class="loc">—</span>
+    <span id="status-badge" class="badge">就绪</span>
+    <button id="btn-theme" class="btn ghost" title="切换明暗主题">◐</button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============ 编译错误提示条 ============ -->
+  <div class="build-errors" id="build-errors" hidden>
+    <span class="be-icon">✕</span>
+    <div class="be-list" id="build-errors-list"></div>
+  </div>
+
+  <!-- ============ 快照时间轴 ============ -->
+  <div class="timeline-bar" id="timeline">
+    <span class="tl-label">快照</span>
+    <div class="tl-track" id="tl-track"></div>
+    <span class="tl-hint" id="tl-hint">点击回看 · 双击与当前对比</span>
+    <button id="btn-clear-tl" class="btn ghost" title="清空历史">✕</button>
+  </div>
+
+  <!-- ============ 源码面板 ============ -->
+  <section class="panel panel-source">
+    <div class="panel-head">
+      <h2>源码</h2>
+      <span class="hint" id="source-hint">点击行号设置断点</span>
+    </div>
+    <div class="source-scroll" id="source-scroll">
+      <ol class="source-code" id="source-code"></ol>
+    </div>
+  </section>
+
+  <!-- 分隔条：拖动调整左右两栏宽度，双击还原 -->
+  <div class="splitter" id="split-1" title="拖动调整宽度 · 双击还原"></div>
+
+  <!-- ============ 内存视图 ============ -->
+  <section class="panel panel-mem">
+    <div class="panel-head">
+      <h2>内存视图</h2>
+      <div class="mem-tools">
+        <div class="legend" id="legend"></div>
+        <select id="addr-mode" class="sel" title="地址显示方式：自动=高 32 位为 0 时折叠">
+          <option value="auto">地址·自动</option>
+          <option value="compact">地址·紧凑</option>
+          <option value="full">地址·完整</option>
+        </select>
+        <select id="mem-sort" class="sel" title="分区排序方式">
+          <option value="teaching">按教材顺序</option>
+          <option value="address">按真实地址</option>
+        </select>
+        <label class="chk"><input type="checkbox" id="toggle-ascii" checked> ASCII</label>
+      </div>
+    </div>
+    <div class="mem-scroll" id="mem-scroll">
+      <div id="mem-regions"></div>
+    </div>
+  </section>
+
+  <div class="splitter" id="split-2" title="拖动调整宽度 · 双击还原"></div>
+
+  <!-- ============ 变量与调用栈 ============ -->
+  <section class="panel panel-side">
+    <div class="panel-head">
+      <h2>调用栈</h2>
+      <span class="hint" id="stack-hint">—</span>
+    </div>
+    <div class="stack-list" id="stack-list"></div>
+
+    <div class="panel-head sub">
+      <h2>变量</h2>
+      <span class="hint" id="var-hint">—</span>
+    </div>
+    <div class="var-list" id="var-list"></div>
+
+    <div class="panel-head sub">
+      <h2>教学提示</h2>
+    </div>
+    <div class="lesson-list" id="lesson-list"></div>
+  </section>
+
+</main>
+
+<!-- ============ 变量 diff 对比面板 ============ -->
+<div class="diff-panel" id="diff-panel" hidden>
+  <div class="diff-head">
+    <span id="diff-title">变量变化</span>
+    <button id="btn-close-diff" class="btn ghost">✕</button>
+  </div>
+  <div class="diff-body" id="diff-body"></div>
+</div>
+
+<div id="tooltip" class="tooltip" hidden></div>
+
+<!-- 变量标签 → 起始字节的指向线（右侧标签连回内存里的位置） -->
+<svg id="var-layer" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<!-- 指针指向连线层：覆盖在所有内容之上，绘制指针 → 目标的箭头 -->
+<svg id="ptr-layer" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<script src="/addr.js"></script>
+<script src="/memview.js"></script>
+<script src="/sourceview.js"></script>
+<script src="/varpanel.js"></script>
+<script src="/timeline.js"></script>
+<script src="/splitter.js"></script>
+<script src="/oplog.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# Python 运行缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 调试器运行日志
+log/
+*.log
+
+# 本机工具链配置：首次运行会自动扫描生成，含本机绝对路径，不入仓库
+config/toolchain.conf
+
+# 第三方工具链压缩包（Volume 较大，且非项目源码）
+Dev-CPP-master.zip
+
+# 截图工具依赖与原始大图；README 使用的精简截图在 docs/images/
+tools/node_modules/
+tools/_playwright/
+tools/shot_*.png
+
+# 临时副本
+*副本.*
+*.bak
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
