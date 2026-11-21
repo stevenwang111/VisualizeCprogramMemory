@@ -46,7 +46,8 @@ _STORAGE_LESSONS = {
     "rdata": (
         CH7,
         "只读数据区",
-        "这个变量在 .rdata 段（只读数据区）。字符串字面量和 const 全局变量"
+        "这个变量在只读数据段（Linux 的 .rodata / Windows 的 .rdata）。"
+        "字符串字面量和 const 全局变量"
         "都住在这里。程序运行期间这一段是只读的 —— 你可以读，但写了就会崩。",
     ),
     "stack": (
@@ -315,7 +316,8 @@ def analyze(
             CH7,
             "字符串常量在哪里",
             "%s 指向的是一个字符串常量：\"%s\"\n\n"
-            "字符串字面量在编译期就写进了程序的只读数据区（.rdata），"
+            "字符串字面量在编译期就写进了程序的只读数据区"
+            "（Linux 的 .rodata / Windows 的 .rdata），"
             "地址是 0x%016X，不是栈也不是堆。\n\n"
             "所以对它执行 `*p = 'X'` 会崩 —— 那段内存是只读的。"
             % (v.get("name"), v.get("preview"), v.get("pointer_target") or 0),

@@ -1,45 +1,33 @@
-"""外部进程内存布局采集（Windows）。
+"""外部进程内存布局采集（平台门面）。
 
-用 `VirtualQueryEx` 枚举目标进程的已提交内存区域，用来确定：
+真正干活的实现按平台拆开：
 
-- **栈**的真实边界：包含当前 rsp 的那块 MEM_PRIVATE 区域
-- **堆**的真实边界：包含 malloc 返回地址的那些 MEM_PRIVATE 区域
-- **映像**区域：哪些是 exe / DLL 映射进来的
+- Windows：`memmap_win.py`，用 `VirtualQueryEx` 枚举已提交区域；
+- Linux / WSL：`memmap_linux.py`，解析 `/proc/<pid>/maps`。
 
-为什么需要它？GDB 在 Windows 上拿不到这些信息：
-
-- `info proc mappings` —— 无输出（Linux 专有）
-- `inferior.memory_regions()` —— 本环境不存在该 API
-
-所以只能从进程外部用 ctypes 问 Windows 内核要。
-
-参考实现要点：`OpenProcess` 的权限参数必须是
-`PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`（0x1000 | 0x10），
-传错会返回 error 87（参数无效）。
+本模块只保留两边共用的数据模型、分类逻辑和统一入口，`collector.py`
+完全不需要知道自己跑在哪个平台上。
 """
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.wintypes as wt
-import os
 import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# --- Windows 常量 ---
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-PROCESS_VM_READ = 0x0010
+# --- 与 Windows 常量保持一致的区域类型（Linux 侧也复用这套取值）---
 MEM_COMMIT = 0x1000
 MEM_FREE = 0x10000
 MEM_RESERVE = 0x2000
 MEM_IMAGE = 0x1000000
 MEM_MAPPED = 0x40000
 MEM_PRIVATE = 0x20000
+
+# --- 保护属性 ---
 PAGE_GUARD = 0x100
 PAGE_NOACCESS = 0x01
 
-#: 保护属性 → 可读性描述
+#: 保护属性 → 可读性描述（Linux 的 perms 也映射到这些值）
 _PROTECT_TEXT = {
     0x01: "不可访问",
     0x02: "只读",
@@ -53,7 +41,7 @@ _PROTECT_TEXT = {
 
 @dataclass
 class MemoryRegion:
-    """一段已提交的内存区域。"""
+    """一段已提交 / 已映射的内存区域。"""
 
     base: int
     size: int
@@ -90,78 +78,23 @@ class MemoryRegion:
         return text
 
 
-class _MBI(ctypes.Structure):
-    _fields_ = [
-        ("BaseAddress", ctypes.c_void_p),
-        ("AllocationBase", ctypes.c_void_p),
-        ("AllocationProtect", wt.DWORD),
-        ("PartitionId", wt.WORD),
-        ("RegionSize", ctypes.c_size_t),
-        ("State", wt.DWORD),
-        ("Protect", wt.DWORD),
-        ("Type", wt.DWORD),
-    ]
+def _impl():
+    """返回当前平台的实现模块。"""
+    if sys.platform == "win32":
+        from . import memmap_win
 
+        return memmap_win
+    from . import memmap_linux
 
-def _open_process(pid: int):
-    """打开目标进程用于查询内存布局。"""
-    if sys.platform != "win32":
-        return None
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, False, pid
-    )
-    if not handle:
-        return None
-    kernel32.CloseHandle.restype = wt.BOOL
-    return kernel32, handle
+    return memmap_linux
 
 
 def enumerate_regions(pid: int, max_regions: int = 4096) -> List[MemoryRegion]:
-    """枚举目标进程所有已提交（MEM_COMMIT）的内存区域。"""
-    if sys.platform != "win32":
-        return []
-
-    opened = _open_process(pid)
-    if opened is None:
-        return []
-    kernel32, handle = opened
-
+    """枚举目标进程的内存区域。任何平台失败都返回空列表，不抛异常。"""
     try:
-        kernel32.VirtualQueryEx.argtypes = [
-            wt.HANDLE,
-            ctypes.c_void_p,
-            ctypes.POINTER(_MBI),
-            ctypes.c_size_t,
-        ]
-        kernel32.VirtualQueryEx.restype = ctypes.c_size_t
-
-        regions: List[MemoryRegion] = []
-        addr = 0
-        while len(regions) < max_regions:
-            mbi = _MBI()
-            if not kernel32.VirtualQueryEx(
-                handle, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)
-            ):
-                break
-            base = mbi.BaseAddress or 0
-            size = mbi.RegionSize
-            if size == 0:
-                break
-            if mbi.State == MEM_COMMIT:
-                regions.append(
-                    MemoryRegion(
-                        base=base,
-                        size=size,
-                        state=mbi.State,
-                        protect=mbi.Protect,
-                        type=mbi.Type,
-                    )
-                )
-            addr = base + size
-        return regions
-    finally:
-        kernel32.CloseHandle(handle)
+        return _impl().enumerate_regions(pid, max_regions=max_regions)
+    except Exception:
+        return []
 
 
 def classify(
@@ -169,10 +102,10 @@ def classify(
     stack_pointer: Optional[int] = None,
     heap_pointers: Optional[List[int]] = None,
 ) -> dict:
-    """把原始区域表分类成「栈 / 堆 / 映像」三类。
+    """把原始区域表分类成「栈 / 堆 / 映像 / 其它」四类。
 
-    返回：
-        {"stack": [region...], "heap": [region...], "image": [region...], "other": [...]}
+    栈和堆的“归属”判定两边一致：包含 rsp 的区域是栈，包含 malloc
+    返回地址的私有区域是堆。具体怎么枚举区域由平台实现负责。
     """
     heap_pointers = heap_pointers or []
     stack_regions: List[MemoryRegion] = []
@@ -202,8 +135,6 @@ def classify(
             stack_regions.append(reg)
         elif in_heap:
             heap_regions.append(reg)
-        elif reg.is_private:
-            other_regions.append(reg)
         else:
             other_regions.append(reg)
 
@@ -216,40 +147,19 @@ def classify(
 
 
 def stack_bounds(regions: List[MemoryRegion], stack_pointer: int):
-    """返回包含 rsp 的区域的 (低地址, 高地址)。找不到则返回 None。
-
-    只认私有（MEM_PRIVATE）区域 —— 栈一定是私有内存。
-    如果误把 exe 的映像段当成栈，会得到完全错误的结果。
-    """
-    for reg in regions:
-        if not reg.is_private:
-            continue
-        if reg.contains(stack_pointer):
-            return reg.base, reg.end
-    return None
+    """返回包含 rsp 的区域的 (低地址, 高地址)。找不到返回 None。"""
+    try:
+        return _impl().stack_bounds(regions, stack_pointer)
+    except Exception:
+        return None
 
 
 def heap_bounds(regions: List[MemoryRegion], pointers: List[int]):
-    """返回所有包含堆指针的私有区域的 (低地址, 高地址) 列表。
-
-    只认私有（MEM_PRIVATE）区域：真正的堆是运行时动态分配的私有内存。
-    exe 的 .data / .bss / .text 属于映像（MEM_IMAGE），不是堆。
-    """
-    out = []
-    seen = set()
-    for ptr in pointers:
-        if not ptr:
-            continue
-        for reg in regions:
-            if not reg.is_private:
-                continue
-            if reg.contains(ptr):
-                key = (reg.base, reg.end)
-                if key not in seen:
-                    seen.add(key)
-                    out.append((reg.base, reg.end))
-                break
-    return out
+    """返回所有包含堆指针的区域的 (低地址, 高地址) 列表。"""
+    try:
+        return _impl().heap_bounds(regions, pointers)
+    except Exception:
+        return []
 
 
 def region_text(reg: MemoryRegion) -> str:
@@ -263,3 +173,18 @@ def region_text(reg: MemoryRegion) -> str:
     else:
         kind = "其它"
     return "%s · %s · %d KB" % (kind, reg.protect_text(), reg.size // 1024)
+
+
+def source_name() -> str:
+    """区域来源的短标签，写进 RegionInfo.source（只用于展示/排查）。"""
+    return "vqex" if sys.platform == "win32" else "proc-maps"
+
+
+def stack_detail() -> str:
+    """栈区域的详情文案。"""
+    return "MEM_PRIVATE" if sys.platform == "win32" else "[stack]"
+
+
+def heap_detail() -> str:
+    """堆区域的详情文案。"""
+    return "MEM_PRIVATE" if sys.platform == "win32" else "匿名映射 / [heap]"

@@ -203,9 +203,9 @@ class Collector:
                     label="堆（动态分配）",
                     start=lo,
                     end=hi,
-                    source="vqex",
+                    source=memmap.source_name(),
                     members=[],
-                    detail="MEM_PRIVATE",
+                    detail=memmap.heap_detail(),
                 )
             )
 
@@ -217,9 +217,9 @@ class Collector:
                     label="栈（函数调用时压栈）",
                     start=lo,
                     end=hi,
-                    source="vqex",
+                    source=memmap.source_name(),
                     members=members.get(KIND_STACK, []),
-                    detail="MEM_PRIVATE",
+                    detail=memmap.stack_detail(),
                 )
             )
 

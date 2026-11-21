@@ -135,6 +135,15 @@ class _Handler(BaseHTTPRequestHandler):
             if self.session is None:
                 return self._send_json({"ok": False, "message": "没有正在进行的调试会话"})
             return self._send_json(self.session.state())
+        if route == "/api/console":
+            if self.session is None:
+                return self._send_json({"ok": False, "message": "没有正在进行的调试会话"})
+            query = parse_qs(parsed.query)
+            try:
+                offset = int((query.get("offset") or ["0"])[0])
+            except ValueError:
+                offset = 0
+            return self._send_json(self.session.console_read(offset))
         if route == "/api/events":
             return self._serve_sse()
         if route == "/api/oplog":
@@ -189,6 +198,11 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/break":
                 result = self.session.command("break", **args)
                 return self._send_json(result)
+            if route == "/api/console":
+                data = payload.get("data", "")
+                if not isinstance(data, str):
+                    data = str(data)
+                return self._send_json(self.session.console_write(data))
         except Exception as exc:
             import traceback
 

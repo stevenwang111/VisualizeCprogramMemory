@@ -62,9 +62,11 @@ Process exited after 8.978 seconds with return value 0
 
 ## 三、平台与适配（暂不排期）
 
-### 4. 非 Windows 平台
+### 4. macOS / ARM64 平台
 
-目前只支持 Windows：`memmap.py` 用 `VirtualQueryEx` 从进程外部查堆栈边界，Linux/macOS 直接跑不起来。要移植得先给这两个平台找到等价的内存布局查询方式。
+Windows 与 Linux x86-64 已支持（Linux 用 `/proc/<pid>/maps` 采集内存布局）。
+macOS 需要另写 `memmap_darwin.py`（`mach_vm_region` 或 `vmmap`），并适配
+Mach-O 段名；ARM64 还需要重新核对寄存器与栈帧模型。两者都暂不排期。
 
 ### 5. 更完整的多文件工程
 

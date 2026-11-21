@@ -56,28 +56,27 @@ def _program_running():
 #: 每次采集递增的序号，主进程靠它判断"文件是不是更新了"
 _SEQ = {"n": 0}
 
-#: 段名 -> 区域种类
+#: 段名 -> 区域种类。
+#:
+#: Windows（PE）和 Linux（ELF）的段名不同：PE 用 .rdata，ELF 用
+#: .rodata / .data.rel.ro。两边都在这里统一成教学用的四种 kind。
 _SECTION_KIND = {
     ".text": "text",
     ".data": "data",
     ".rdata": "rdata",
+    ".rodata": "rdata",
+    ".data.rel.ro": "rdata",
     ".bss": "bss",
-    ".idata": "rdata",
-    ".tls": "data",
+    ".tbss": "bss",
+    ".tdata": "data",
 }
 
-#: 需要忽略的段（对教学没价值，且内容庞大）
-_IGNORED_SECTIONS = {
-    ".pdata",
-    ".xdata",
-    ".reloc",
-    ".rsrc",
-    ".rsrc$01",
-    ".00cfg",
-    ".didat",
-    ".idata",   # 导入表：体积大且与教学无关
-    ".tls",     # 线程局部存储：初学者用不到
-}
+#: 段白名单：只保留对教学有意义的段。
+#:
+#: 用白名单而不是「忽略表」：ELF 的段名远比 PE 多
+#: （.interp/.dynsym/.rela.*/.plt/.eh_frame/...），补全忽略表既写不完，
+#: 也容易随工具链版本变化而漏。白名单天然把无关段挡在外面。
+_TEACHING_SECTIONS = set(_SECTION_KIND)
 
 
 def _log(msg):
@@ -161,7 +160,7 @@ def _parse_sections():
             hi = int(hi_s.strip(), 16)
         except ValueError:
             continue
-        if name in _IGNORED_SECTIONS:
+        if name not in _TEACHING_SECTIONS:
             continue
         sections.append(
             {
@@ -172,12 +171,34 @@ def _parse_sections():
             }
         )
 
+    sections = _merge_sections(sections)
+
     # 程序没跑时不缓存 —— 那份是文件虚拟地址，下次运行后就是错的
     if _program_running():
         _SECTION_CACHE = sections
     else:
         _SECTION_CACHE = None
     return sections
+
+
+def _merge_sections(sections):
+    """合并相邻 / 重叠的同类型段。
+
+    ELF 的代码段常被拆成 .init/.plt/.text/.fini 等几块；白名单虽然只留下
+    .text，但 .data 与 .tdata、.data.rel.ro 之间也可能出现同 kind 的邻接
+    区间。合并后内存视图里不会出现两个「数据段」分区。
+    """
+    merged = []
+    for sec in sorted(sections, key=lambda s: s["start"]):
+        if merged:
+            prev = merged[-1]
+            if prev["kind"] == sec["kind"] and sec["start"] <= prev["end"]:
+                prev["end"] = max(prev["end"], sec["end"])
+                if sec["name"] not in prev["name"].split(" + "):
+                    prev["name"] += " + " + sec["name"]
+                continue
+        merged.append(dict(sec))
+    return merged
 
 
 def _locate(addr):

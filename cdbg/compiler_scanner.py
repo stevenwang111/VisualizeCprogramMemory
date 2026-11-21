@@ -57,26 +57,47 @@ CONFIG_DIR_NAME = "config"
 CONFIG_FILE_NAME = "toolchain.conf"
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, CONFIG_DIR_NAME, CONFIG_FILE_NAME)
 
-# 要检查的基础头文件：C 标准库 + C++ 标准库 + Windows API
-HEADERS = [
-    "windows.h", "stdio.h", "stdlib.h", "string.h", "math.h",
-    "assert.h", "time.h", "stdint.h",
-    "iostream", "vector", "string", "algorithm", "cstdio", "cstring",
-]
-CORE_HEADERS = ("windows.h", "stdio.h", "iostream")
+# 要检查的基础头文件：C 标准库 + C++ 标准库（Windows 额外检查 Windows API）
+if IS_WIN:
+    HEADERS = [
+        "windows.h", "stdio.h", "stdlib.h", "string.h", "math.h",
+        "assert.h", "time.h", "stdint.h",
+        "iostream", "vector", "string", "algorithm", "cstdio", "cstring",
+    ]
+    CORE_HEADERS = ("windows.h", "stdio.h", "iostream")
+else:
+    HEADERS = [
+        "stdio.h", "stdlib.h", "string.h", "math.h",
+        "assert.h", "time.h", "stdint.h",
+        "iostream", "vector", "string", "algorithm", "cstdio", "cstring",
+    ]
+    CORE_HEADERS = ("stdio.h", "stdlib.h", "string.h")
 
 # 截图里 Dev-C++「程序」页的六个工具名，配置字段与之对齐
-TOOL_CANDIDATES = {
-    "gcc":     ("gcc.exe",),
-    "g++":     ("g++.exe", "g++-15.exe", "g++-14.exe", "g++-13.exe", "g++-12.exe"),
-    "make":    ("make.exe", "mingw32-make.exe"),
-    "gdb":     ("gdb.exe",),
-    "windres": ("windres.exe",),
-    "gprof":   ("gprof.exe",),
-}
-EXE_HINTS = (
-    "gcc.exe", "g++.exe", "clang.exe", "clang++.exe", "cl.exe", "avr-gcc.exe",
-)
+if IS_WIN:
+    TOOL_CANDIDATES = {
+        "gcc":     ("gcc.exe",),
+        "g++":     ("g++.exe", "g++-15.exe", "g++-14.exe", "g++-13.exe", "g++-12.exe"),
+        "make":    ("make.exe", "mingw32-make.exe"),
+        "gdb":     ("gdb.exe",),
+        "nm":      ("nm.exe",),
+        "windres": ("windres.exe",),
+        "gprof":   ("gprof.exe",),
+    }
+    EXE_HINTS = (
+        "gcc.exe", "g++.exe", "clang.exe", "clang++.exe", "cl.exe", "avr-gcc.exe",
+    )
+else:
+    TOOL_CANDIDATES = {
+        "gcc":     ("gcc", "cc", "clang"),
+        "g++":     ("g++", "c++", "clang++"),
+        "make":    ("make", "gmake"),
+        "gdb":     ("gdb",),
+        "nm":      ("nm",),
+        "windres": (),
+        "gprof":   ("gprof",),
+    }
+    EXE_HINTS = ("gcc", "cc", "clang", "g++", "c++", "clang++")
 
 # ---------------------------------------------------------------- 小工具
 
@@ -100,8 +121,12 @@ def _uniq(seq):
 
 
 def _is_executable(path: str) -> bool:
-    return os.path.isfile(path) and (not IS_WIN or path.lower().endswith(
-        (".exe", ".com", ".bat", ".cmd")))
+    if not os.path.isfile(path):
+        return False
+    if IS_WIN:
+        return path.lower().endswith((".exe", ".com", ".bat", ".cmd"))
+    # POSIX：不看后缀，看实际可执行位
+    return os.access(path, os.X_OK)
 
 
 def _run(exe: str, args, timeout=8, stdin_data=None):
@@ -172,7 +197,7 @@ def _candidate_dirs_from_roots(roots, patterns):
         for pat in patterns:
             for p in glob.glob(os.path.join(root, pat)):
                 if os.path.isdir(p) and any(
-                    os.path.isfile(os.path.join(p, h)) for h in EXE_HINTS
+                    _is_executable(os.path.join(p, h)) for h in EXE_HINTS
                 ):
                     found[os.path.normcase(os.path.normpath(p))] = p
     return found
@@ -220,8 +245,11 @@ def scan_path_dirs():
         d = d.strip().strip('"')
         if not d or not os.path.isdir(d):
             continue
-        if any(os.path.isfile(os.path.join(d, h)) for h in EXE_HINTS):
-            found[os.path.normcase(os.path.normpath(d))] = d
+        if any(_is_executable(os.path.join(d, h)) for h in EXE_HINTS):
+            # /bin 常常只是 /usr/bin 的符号链接；按真实路径去重，
+            # 否则扫描结果里会冒出两套一模一样的工具链。
+            key = os.path.normcase(os.path.realpath(d))
+            found.setdefault(key, d)
     return found
 
 
@@ -250,7 +278,7 @@ def scan_env_vars():
             candidates += [p, os.path.join(p, "bin")]
         for d in candidates:
             if os.path.isdir(d) and any(
-                os.path.isfile(os.path.join(d, h)) for h in EXE_HINTS
+                _is_executable(os.path.join(d, h)) for h in EXE_HINTS
             ):
                 key = os.path.normcase(os.path.normpath(d))
                 if key in found:
@@ -261,7 +289,9 @@ def scan_env_vars():
 
 
 def scan_devcpp():
-    """Dev-C++（含其内嵌的 MinGW32/MinGW64）。"""
+    """Dev-C++（含其内嵌的 MinGW32/MinGW64）。仅 Windows。"""
+    if not IS_WIN:
+        return {}
     roots = []
     for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "USERPROFILE"):
         base = _env(var)
@@ -343,7 +373,9 @@ def scan_vscode():
 
 
 def scan_visual_studio():
-    """Visual Studio：vswhere + 常见 MSVC 工具目录。"""
+    """Visual Studio：vswhere + 常见 MSVC 工具目录。仅 Windows。"""
+    if not IS_WIN:
+        return {}
     found = {}
     pf = _env("ProgramFiles")
     pf86 = _env("ProgramFiles(x86)")
@@ -379,7 +411,13 @@ def scan_embedded():
 
 
 def scan_common_roots():
-    """MSYS2 / MinGW-w64 / TDM / Cygwin / Arduino 等常见安装位置。"""
+    """MSYS2 / MinGW-w64 / TDM / Cygwin / Arduino 等常见安装位置。仅 Windows。
+
+    Linux 上的编译器本来就装在 PATH（/usr/bin、/usr/local/bin）里，
+    由 `scan_path_dirs()` 负责；这里不盲目扫全盘。
+    """
+    if not IS_WIN:
+        return {}
     pats = (
         "msys64/*/bin", "msys2/*/bin", "MinGW/bin", "mingw64/bin",
         "mingw-w64/*/bin", "TDM-GCC-*/bin", "cygwin*/bin", "w64devkit/bin",
@@ -405,32 +443,43 @@ def _detect_family(bindir: str):
         names = {f.lower() for f in os.listdir(bindir)}
     except Exception:
         pass
-    if "cl.exe" in names:
+    if "cl.exe" in names or "cl" in names:
         return "MSVC"
-    if "clang.exe" in names or "clang++.exe" in names:
-        return "Clang"
-    if "avr-gcc.exe" in names:
+    if "avr-gcc.exe" in names or "avr-gcc" in names:
         return "GCC (AVR)"
-    if "gcc.exe" in names or "g++.exe" in names or "g++-13.exe" in names:
+    if names & {"gcc.exe", "gcc", "g++.exe", "g++"}:
         return "GCC"
+    if names & {"clang.exe", "clang", "clang++.exe", "clang++"}:
+        return "Clang"
     return None
 
 
 def _detect_exe(bindir: str, family: str) -> str:
     prefer = {
         "GCC": TOOL_CANDIDATES["gcc"] + TOOL_CANDIDATES["g++"],
-        "GCC (AVR)": ("avr-gcc.exe", "avr-g++.exe"),
-        "Clang": ("clang.exe", "clang++.exe"),
-        "MSVC": ("cl.exe",),
+        "GCC (AVR)": ("avr-gcc.exe", "avr-g++.exe", "avr-gcc"),
+        "Clang": ("clang.exe", "clang++.exe", "clang", "clang++"),
+        "MSVC": ("cl.exe", "cl"),
     }.get(family, ())
     for n in prefer:
         p = os.path.join(bindir, n)
-        if os.path.isfile(p):
+        if _is_executable(p):
             return p
     return ""
 
 
 def _guess_name(bindir: str, source: str) -> str:
+    if not IS_WIN:
+        low = bindir.replace("\\", "/").lower()
+        if "clang" in low:
+            return "系统 Clang"
+        if low in ("/usr/bin", "/bin"):
+            return "系统 GCC"
+        if "/usr/local/" in low:
+            return "本地安装 GCC"
+        if "PATH" in source:
+            return "PATH 中的 GCC"
+        return "系统 GCC"
     p = bindir.replace("/", "\\")
     low = p.lower()
     if "msys64" in low or "msys2" in low:
@@ -481,7 +530,7 @@ def _probe_gdb_python(gdb_exe: str) -> str:
     `gdb --batch -ex "python print(1)"` 能打出 1 才算合格；裁掉 Python 的
     gdb（有些精简版发行包只留了 gdb 的 C 部分）调试起来会一声不响地不出变量。
     """
-    if not gdb_exe or not os.path.isfile(gdb_exe):
+    if not gdb_exe or not _is_executable(gdb_exe):
         return "未知"
     out, err = _run(gdb_exe, ["--batch", "--nx", "-ex", "python print(1)"], timeout=10)
     text = (out or "") + (err or "")
@@ -493,16 +542,25 @@ def _probe_gdb_python(gdb_exe: str) -> str:
 def _probe_include_dirs(exe: str, family: str, bindir: str) -> list:
     dirs = []
     if family.startswith("GCC") or family == "Clang":
-        # 让编译器自己说出头文件搜索路径，比猜目录可靠
-        _, err = _run(exe, ["-E", "-x", "c++", "-v", "-"], timeout=10, stdin_data="")
-        m = re.search(
-            r"#include <\.\.\.> search starts here:\s*(.*?)\s*End of search list\.",
-            err, re.S)
-        if m:
+        # 让编译器自己说出头文件搜索路径，比猜目录可靠。
+        # 先问 C++；只有 C 编译器（没装 g++）时退回 C —— 否则会把一套
+        # 能正常调试 C 的工具链误判成「库不完整」。
+        def _search_dirs(lang):
+            _, err = _run(exe, ["-E", "-x", lang, "-v", "-"], timeout=10,
+                          stdin_data="")
+            m = re.search(
+                r"#include <\.\.\.> search starts here:\s*(.*?)\s*End of search list\.",
+                err, re.S)
+            if not m:
+                return []
+            out = []
             for line in m.group(1).splitlines():
                 line = line.strip()
                 if line and not line.lower().startswith("ignoring") and os.path.isdir(line):
-                    dirs.append(os.path.normpath(line))
+                    out.append(os.path.normpath(line))
+            return out
+
+        dirs = _search_dirs("c++") or _search_dirs("c")
     root = os.path.dirname(bindir)
     if not dirs:
         # 老版本 gcc（Dev-C++ 自带那种）可能不吐搜索路径，退回目录推断
@@ -572,7 +630,7 @@ def _collect_tools(bindir: str) -> dict:
     for key, names in TOOL_CANDIDATES.items():
         for n in names:
             p = os.path.join(bindir, n)
-            if os.path.isfile(p):
+            if _is_executable(p):
                 tools[key] = p
                 break
         else:
@@ -664,6 +722,7 @@ def _kv(tc: Toolchain, indent="") -> list:
         indent + "make = " + tc.tools.get("make", ""),
         indent + "gdb = " + tc.tools.get("gdb", ""),
         indent + "gdb的Python支持 = " + tc.gdb_python,
+        indent + "nm = " + tc.tools.get("nm", ""),
         indent + "windres = " + tc.tools.get("windres", ""),
         indent + "gprof = " + tc.tools.get("gprof", ""),
     ]
@@ -831,7 +890,7 @@ class Tui:
                 out.append("  主程序   " + tc.exe)
                 out.append("  来源     " + tc.source_text())
                 out.append("  include  " + ((" | ".join(tc.include_dirs[:2]))[:76] if tc.include_dirs else "无"))
-                for k in ("gcc", "g++", "make", "gdb", "windres", "gprof"):
+                for k in ("gcc", "g++", "make", "gdb", "nm", "windres", "gprof"):
                     out.append("  %-7s %s" % (k, tc.tools.get(k) or "—"))
                 miss = ", ".join(tc.missing[:6]) or "无"
                 out.append("  头文件   " + self.GREEN + "核心齐备" + self.RESET +

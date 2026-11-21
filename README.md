@@ -15,21 +15,25 @@
 ```bash
 cd cdbg
 python cdbg.py examples/ch06_pointer.c
+
+# Linux / WSL2
+python3 cdbg.py examples/ch06_pointer.c --no-browser
 ```
 
-浏览器会自动打开调试界面。三个面板从左到右分别是**源码**、**内存视图**、**调用栈与变量**。
+浏览器会自动打开调试界面。三个面板从左到右分别是**源码**、**内存视图**、**调用栈与变量**。Linux 额外提供可折叠的「程序输出」终端面板。
 
 ### 环境要求
 
 | 组件 | 要求 | 说明 |
 |---|---|---|
 | Python | 3.9+ | 只用标准库，无需 pip 安装任何东西 |
-| GCC | 支持 `-g -O0` | MSYS2 UCRT64 / MinGW-w64 均可 |
+| GCC | 支持 `-g -O0` | Windows：MSYS2 UCRT64 / MinGW-w64；Linux：`sudo apt install gcc` |
 | GDB | **必须带 Python 支持** | `gdb --batch -ex "python print(1)"` 能打印即合格 |
+| 平台 | Windows 10+ / Linux x86-64 | Linux 支持在 Ubuntu / WSL2 上验证；ARM64 暂未适配 |
 
-**不用手工配路径。** 第一次运行时，工具会自己扫一遍本机（PATH、Dev-C++、
-VS Code、Visual Studio、常见安装目录……），挑一套带 gcc + gdb（且 gdb 带
-Python）的工具链，写进 `config/toolchain.conf`。之后每次启动直接读它。
+**不用手工配路径。** 第一次运行时，工具会自己扫一遍本机（Windows：PATH、Dev-C++、
+VS Code、Visual Studio、常见安装目录；Linux：PATH、环境变量），挑一套带 gcc + gdb
+（且 gdb 带 Python）的工具链，写进 `config/toolchain.conf`。之后每次启动直接读它。
 
 ```bash
 python cdbg.py --toolchain        # 看当前用的是哪套编译器/调试器
@@ -41,8 +45,13 @@ python cdbg.py --scan-compiler    # 重新扫描并交互选择（也可双击 s
 也可以显式指定，优先级最高（临时绕过配置）：
 
 ```bash
+# Windows
 set CDBG_CC=C:\msys64\ucrt64\bin\gcc.exe
 set CDBG_GDB=C:\msys64\ucrt64\bin\gdb.exe
+
+# Linux / WSL2
+export CDBG_CC=/usr/bin/gcc
+export CDBG_GDB=/usr/bin/gdb
 ```
 
 > 注意：Dev-C++ 自带的 gdb 是**没有 Python 支持**的精简版，选它会让调试界面
@@ -54,7 +63,8 @@ set CDBG_GDB=C:\msys64\ucrt64\bin\gdb.exe
 
 ```bash
 python cdbg.py prog.c                 # 编译并打开可视化界面
-python cdbg.py prog.exe               # 调试已编译好的程序
+python cdbg.py prog.exe               # Windows：调试已编译好的程序
+python3 cdbg.py prog                  # Linux：调试已编译好的程序（无 .exe 后缀）
 python cdbg.py prog.c --no-browser    # 不自动开浏览器（自己访问打印的地址）
 python cdbg.py prog.c --no-instrument # 关闭堆跟踪插桩
 python cdbg.py prog.c --headless      # 终端输出模式，供 IDE 调用
@@ -73,7 +83,7 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 | 跳出函数 | `Ctrl+F8` | 一直跑到当前函数返回 |
 | 运行到光标 | `Ctrl+F5` | 跑到你点的那一行（先点源码正文设置光标） |
 | 继续 | `F4` | 跑到下一个断点；程序可能一直跑，所以点了就返回不卡界面 |
-| 停止执行 | `F6` | 杀掉正在运行的程序。**长按 3 秒**=强制结束（`taskkill /F`） |
+| 停止执行 | `F6` | 杀掉正在运行的程序。**长按 3 秒**=强制结束进程（Windows `taskkill /F`，Linux `SIGKILL`） |
 | 重启 | — | 从头再跑一遍，断点保留 |
 | 清空界面 | — | 把这次调试看到的画面全清掉（源码和断点留着） |
 
@@ -92,8 +102,9 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 ### 停止执行：短按 / 长按
 
 - **短按（或 F6）**：正常停止，走 GDB 的中断 + kill，实测 0.2~0.4 秒确认死透。
-- **按住 3 秒**：按钮里会有一条红色进度条从左往右长满，满格时对程序执行
-  `taskkill /PID <pid> /F`，**只杀被调试的程序，不杀 GDB** —— 符号表和断点都还在，
+- **按住 3 秒**：按钮里会有一条红色进度条从左往右长满，满格时从外面强制结束
+  被调试进程（Windows 用 `taskkill /PID <pid> /F`，Linux 用 `SIGKILL`），
+  **只杀被调试的程序，不杀 GDB** —— 符号表和断点都还在，
   接着按「调试」就能重来。
 
 长按是**兜底**，平时用不上：只有在 GDB 自己也卡住时（程序陷在系统调用里、
@@ -106,16 +117,25 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 
 ### 程序的输入输出
 
-被调试程序有**自己独立的**真实控制台窗口（不是浏览器里模拟的终端）：
+**Windows**：被调试程序有**自己独立的**真实控制台窗口（不是浏览器里模拟的终端）：
 窗口标题就是程序的完整路径，`printf` 往那儿打，`scanf` 从那儿读。
 
 - 不会再冒出一个「gdb.exe」的黑窗口 —— GDB 自己的控制台是创建后立刻隐藏的
   （Dev-C++ 的 `Debugger.pas` 就是这么干的：`CREATE_NEW_CONSOLE` 起 gdb，
   再用 `STARTF_USESHOWWINDOW` + `SW_HIDE` 把窗口藏起来）。
-- 这个独立控制台不是可有可无的装饰：GDB 靠管道和调试器通信，程序若跟
+- 程序退出后那个窗口会随之关闭（和 Dev-C++ 调试时的行为一致）。
+
+**Linux / WSL2**：程序通过 PTY 运行，输出显示在界面底部可折叠的
+「程序输出」面板里；`scanf` 的输入也直接在那个面板下方的输入框里敲。
+这样不会跟 GDB 的 MI 管道抢 stdin。
+
+- 这个独立终端不是可有可无的装饰：GDB 靠管道和调试器通信，程序若跟
   MI 命令共用一个 stdin，`scanf` 会读到调试命令、或者直接挂死。
-- 程序退出后那个窗口会随之关闭（和 Dev-C++ 调试时的行为一致）。想在退出后
-看到最后那几行输出，就在最后一行下个断点，或者把输出重定向到文件。
+- 程序退出后输出仍保留在面板里，方便回看最后几行。
+
+WSL 下如果没装 `wslview`，cdbg 无法自动拉起 Windows 浏览器；用
+`--no-browser` 启动，然后在 Windows 浏览器里打开终端打印的
+`http://127.0.0.1:<端口>/`。
 
 ![程序等待输入时的提示](docs/images/input.png)
 
@@ -193,10 +213,11 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 执行 `scanf` 这类会阻塞的调用时，程序在等键盘输入，前端只能干等到超时，
 工具栏的按钮会一直灰着。这时候按钮右边会出现一行蓝色提示：
 
-> 指令运行中，请检查程序是否在等待输入，如果是，请到控制台输入一些字符
+> 指令运行中，请检查程序是否在等待输入；Linux 可在下方「程序输出」面板输入
 
 普通命令几十毫秒就返回，所以这行字延迟 0.6 秒才出现，不会每点一下闪一下。
-看到它就去程序的控制台窗口敲点东西，程序继续跑，提示会自动消失。
+看到它就去程序的终端敲点东西（Windows 是独立控制台窗口，Linux 是界面底部的
+「程序输出」面板），程序继续跑，提示会自动消失。
 
 ### 地址怎么显示
 
@@ -299,7 +320,8 @@ python cdbg.py --scan-compiler        # 重新扫描并选择工具链
 
 ## 已知限制
 
-- 目前只支持 Windows（内存布局采集用了 `VirtualQueryEx`）
+- 平台：Windows 10+ 与 Linux x86-64（Ubuntu / WSL2 已验证）；macOS 与 ARM64 暂未适配
+- Linux 属于**实验性支持**：内存布局用 `/proc/<pid>/maps`，堆/栈区域可能会按进程实际映射拆成多块
 - 只支持 C，GDB attach 不支持；`.cpp` 文件请先用 `gcc -x c` 转换
 - 堆跟踪依赖 `malloc`/`free` 宏重定向；用了自定义分配器的程序不会有堆账本
 - `.text`（代码段）只展示前 192 字节作示意，不做反汇编
