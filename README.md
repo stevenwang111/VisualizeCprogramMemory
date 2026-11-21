@@ -416,3 +416,20 @@ python tests/test_batch.py D:/cdesign # 批量测任意目录
 - `.text`（代码段）只展示前 192 字节作示意，不做反汇编
 - 多文件工程：工具会自动把定义了缺失符号的 `.c` 一起编译，
   但只支持「一个主文件 + 若干辅助文件」这种简单结构
+
+---
+
+## 参与开发
+
+想改代码或接手维护，从 [`CONTRIBUTING.md`](CONTRIBUTING.md) 开始——环境、本地跑法、
+改代码的硬规矩、测试、云端构建都在那里；架构和已知的坑见 [`DEVREADME.md`](DEVREADME.md)。
+
+## 许可证与致谢
+
+本项目使用 [MIT License](LICENSE)。
+
+交互设计参考了 [Red Panda Dev C++（小熊猫 Dev-C++）](https://github.com/royqh1979/RedPanda-CPP)
+的快捷键语义、GDB 启动方式和工具链字段命名，目的是让 C 语言初学者从 Dev-C++
+切过来不用重新学。上游项目以 GPL v3 发布；本项目是独立的 Python/HTML 实现，
+未包含其源码，只参考了行为设计。`Dev-CPP-master.zip` 那份源码包仅作参考，
+不随项目分发。
