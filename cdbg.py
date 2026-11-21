@@ -3,7 +3,8 @@
 
 用法：
     cdbg prog.c              编译并启动调试会话，自动打开可视化界面
-    cdbg prog.exe            调试已编译好的可执行文件
+    cdbg prog.exe            调试已编译好的可执行文件（Windows）
+    cdbg prog                调试已编译好的可执行文件（Linux）
     cdbg prog.c --no-browser 不自动开浏览器（自己访问打印出来的地址）
     cdbg prog.c --headless   无界面模式，只在终端打印状态（供 IDE 调用）
 
@@ -44,10 +45,11 @@ def parse_args(argv):
 示例:
   cdbg hello.c                 编译并打开可视化调试界面
   cdbg hello.c --no-browser    不自动打开浏览器
-  cdbg hello.exe               调试已编译好的程序
+  cdbg hello.exe               调试已编译好的程序（Windows）
+  cdbg hello                   调试已编译好的程序（Linux）
 """,
     )
-    parser.add_argument("source", nargs="?", help="要调试的 .c 源文件或 .exe 可执行文件")
+    parser.add_argument("source", nargs="?", help="要调试的 .c 源文件或可执行文件")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--headless", action="store_true", help="无界面模式（终端输出）")
     parser.add_argument("--port", type=int, default=0, help="Web 服务端口，0 表示自动选择")
@@ -208,6 +210,9 @@ def main(argv=None):
     if not args.no_browser:
         if not open_browser(url):
             print("  (没能自动打开浏览器，请手动访问上面的地址)")
+            if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+                print("  (WSL 环境：请用 Windows 浏览器打开上面的 127.0.0.1 地址；"
+                      "也可安装 wslu 后使用 wslview)")
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

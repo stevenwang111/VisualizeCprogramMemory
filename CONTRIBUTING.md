@@ -8,14 +8,14 @@
 
 ---
 
-## 1. 环境（Windows 限定）
+## 1. 环境（Windows / Linux）
 
 | 依赖 | 说明 |
 |---|---|
 | Python 3.9+ | 只用标准库，别引入 Flask / FastAPI 之类的 pip 包 |
-| GCC | 编译要 `-g -O0`；实测 `C:\msys64\ucrt64\bin\gcc.exe` 可用 |
+| GCC | 编译要 `-g -O0`；Windows 实测 `C:\msys64\ucrt64\bin\gcc.exe`，Linux 用 `/usr/bin/gcc` |
 | GDB | **必须带 Python 支持**：`gdb --batch -ex "python print(1)"` 能打印 `1` 才算合格 |
-| Edge | 前端截图/UI 回归用 `playwright-core`（在 `tools/node_modules`），走 `channel: "msedge"` |
+| Edge | 前端截图/UI 回归用 `playwright-core`（在 `tools/node_modules`），走 `channel: "msedge"`（Windows） |
 
 工具链配置 `config/toolchain.conf` 是唯一权威来源（扫描生成、读取分离）。首次开箱若配置缺失或路径失效，会自动重扫覆盖，所以整个目录拷到另一台机器也能跑。`CDBG_CC` / `CDBG_GDB` 可临时覆盖，优先级高于配置。
 
@@ -23,9 +23,16 @@
 python cdbg.py --toolchain                    # 看当前用哪个 gcc/gdb、配置在哪
 python cdbg.py --scan-compiler                # 重扫 + TUI 选择
 python cdbg.py --scan-compiler --select 2     # 非交互直选第 2 套
+
+# Linux / WSL2
+sudo apt install gcc gdb
+python3 cdbg.py --toolchain
 ```
 
-**只有 Windows**：`memmap.py` 用 `VirtualQueryEx` 从进程外部查堆栈边界，Linux/macOS 直接跑不起来。
+**平台差异**：内存布局采集在 Windows 用 `VirtualQueryEx`（`cdbg/memmap_win.py`），
+在 Linux 用 `/proc/<pid>/maps`（`cdbg/memmap_linux.py`），统一入口是
+`cdbg/memmap.py`。`collector.py` 不感知平台。Linux 开发建议把仓库放在 WSL 的
+ext4 文件系统（如 `~/cdbg`），不要在 `/mnt/c` 上做主要编译与测试。
 
 ---
 
@@ -36,6 +43,7 @@ python cdbg.py examples/ch06_pointer.c              # 编译 + GDB + Web + 开�
 python cdbg.py prog.c --no-browser --port 8779      # 自己访问 http://127.0.0.1:8779/
 python cdbg.py prog.c --headless                    # 终端输出快照，给 IDE/脚本调用
 python cdbg.py prog.exe --keep-workdir              # 调试现成 exe，保留临时工作目录
+python3 cdbg.py prog --keep-workdir                 # Linux：调试现成可执行文件
 python cdbg.py prog.c --no-instrument               # 关掉堆跟踪插桩
 ```
 
@@ -92,7 +100,9 @@ cdbg/
 │  ├─ gdb_session.py          MI2 会话管理、命令收发
 │  ├─ gdb_probe.py            嵌入 GDB 的采集脚本（变量/栈帧/内存/段）
 │  ├─ collector.py            采集结果 → Snapshot 的聚合层
-│  ├─ memmap.py               外部进程内存布局（堆/栈真实边界）
+│  ├─ memmap.py               内存布局平台门面（按 sys.platform 分派）
+│  ├─ memmap_win.py           Windows：VirtualQueryEx
+│  ├─ memmap_linux.py         Linux：/proc/<pid>/maps
 │  ├─ heap_ledger.py          堆账本解析
 │  ├─ curriculum.py           教材知识点映射（提示文案的唯一来源）
 │  ├─ snapshot.py             数据模型
@@ -118,7 +128,7 @@ cdbg/
 | `instrument.py` | 往源码插一行 `#include "cdbg_shim.h"` | 有失败降级逻辑；插桩只记录、不改变内存布局 |
 | `collector.py` | 探针数据 + memmap + heap ledger → Snapshot | 四个教学分区在这里拼装 |
 | `snapshot.py` | 全部 dataclass 与 JSON 序列化 | **前后端唯一契约**，改字段必须同步前端渲染 |
-| `memmap.py` | `VirtualQueryEx` 查真实堆栈边界 | Windows 专用；GDB 在 Windows 拿不到 `info proc mappings` |
+| `memmap.py` | 平台门面：Windows `VirtualQueryEx` / Linux `/proc/<pid>/maps` | 新平台只需加一个 `memmap_<platform>.py`；`collector.py` 不要出现平台分支 |
 | `heap_ledger.py` | 解析 shim 打出的堆账本 | 记录了每块内存是哪一行 malloc 的 |
 | `curriculum.py` | 教学提示文案的唯一来源 | 改提示文案来这里，别散落到前端 |
 | `web_server.py` | 静态托管 + REST + SSE + 操作日志接口 | 标准库 `ThreadingHTTPServer`，别加第三方框架 |
@@ -223,7 +233,7 @@ cdbg/
 - **配置里存的是绝对路径**：换设备、卸载重装、改盘符都会让它失效。判断「能不能用」必须落到 `os.path.isfile`，不能只看配置存在 —— 否则会拿一个不存在的路径去 `Popen`，报错信息离真正原因十万八千里。
 - **「清空界面」必须清在会话层，不能只擦 DOM**：画面是 `/api/state` + SSE 的投影，前端擦一遍之后，任何一次 `fetchState`（下一条命令的 finally、刷新页面）都会把旧快照请回来。 `session._clear_view()` 干三件事：程序还在跑就先 kill、`snapshot = None`、`state_name = "not-started"`，再 `_broadcast(None)`。**断点刻意不清**（它属于源码上的设置）。这个分支必须在 `command()` 里**提前 return**，否则后面的 `_collect_and_broadcast` 会立刻把刚扔掉的快照捡回来。
 - **清空界面时 `render(source, null)` 会保留上一行的 `currentLine`**：这是刻意的（重画源码时不希望高亮乱跳），所以清空要先调 `SourceView.clearPosition()` 把蓝行/绿行显式抹掉。
-- **长按强制结束只杀 inferior，不杀 gdb.exe**：`taskkill /PID <pid> /F` 干掉被调试程序，GDB 收到退出事件后自己醒过来，符号表和断点都还在，接着按「调试」能直接重来。PID 从快照里抄（`session._target_pid`），**每次起新 inferior 都要清空**：Windows 会复用 PID，拿旧 PID 开枪可能打到无关进程。
+- **长按强制结束只杀 inferior，不杀 gdb**：Windows 用 `taskkill /PID <pid> /F`，Linux 用 `SIGKILL` 干掉被调试程序，GDB 收到退出事件后自己醒过来，符号表和断点都还在，接着按「调试」能直接重来。PID 从快照里抄（`session._target_pid`），**每次起新 inferior 都要清空**：Windows 会复用 PID，拿旧 PID 开枪可能打到无关进程。
 - **`taskkill` 的输出不要 `text=True` 收**：中文系统上是 GBK，换区域设置就会解码报错；只关心退出码，stdout/stderr 一律 `DEVNULL`，并带 `CREATE_NO_WINDOW` 免得闪黑框。
 - **「停止执行」的点击不能挂在 `click` 上**：长按 3 秒后松手，`click` 也会跟着触发，等于强杀完又发一条 stop。改成 `pointerdown` 起计时、`pointerup` 收尾（挂在 `window` 上，手指拖出按钮再松手也要收尾，否则进度条会一直挂着），不满 3 秒才走普通 `stop`。
 
@@ -236,7 +246,16 @@ python tests/test_e2e.py              # 端到端冒烟：编译 → 起 GDB →
 python tests/test_batch.py            # 批量测 examples/
 python tests/test_batch.py D:/cdesign # 批量测任意目录（自带跳过第三方老代码的逻辑）
 python tests/test_examples.py         # 示例集
+python tests/test_memmap_linux.py     # /proc/<pid>/maps 解析（平台无关，任何系统都能跑）
+
+# Linux / WSL2（在 ~/cdbg 这类 ext4 目录里跑）
+python3 tests/test_memmap_linux.py
+python3 tests/test_examples.py
+python3 tests/test_e2e.py
 ```
+
+Linux 上交互式程序（`ch10_input.c`）通过 PTY 运行，输出和输入都在 Web 的
+「程序输出」面板里；非交互示例的行为与 Windows 一致。
 
 批量测试对每个源文件走四关：**编译 → 启动 → 停在 main → 采集到变量信息**。源程序本身有编译错误时，只要工具能定位到出错位置（文件/行号/原因），就算它工作正常 —— 源程序的错不是工具的错。
 

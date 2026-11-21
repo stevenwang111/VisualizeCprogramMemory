@@ -75,6 +75,7 @@ class GdbSession:
         self._cond = threading.Condition(self._lock)
         self._events: deque = deque()
         self._console: List[str] = []
+        self._program_console: List[str] = []
         self._result: Optional[Dict[str, Any]] = None
         self._closed = False
         self._gdb_ready = False
@@ -102,8 +103,13 @@ class GdbSession:
         #: 否则它会把新会话的 _closed 置成 True（表现为刚重连就卡死）。
         self._proc_gen = 0
         #: new-console 是否设置成功 —— "own" 表示程序有自己的控制台窗口
-        self.console_mode = "own"
+        self.console_mode = "own" if os.name == "nt" else "none"
         self._new_console = False
+        #: 被调试程序的 PTY（Linux 下用它给 scanf / printf 一个真正的终端）
+        self._pty_master: Optional[int] = None
+        self._pty_slave: Optional[int] = None
+        self._pty_stop = threading.Event()
+        self._console_io_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -125,9 +131,13 @@ class GdbSession:
         程序的 stdin 若和 MI 命令挤在同一个管道里，scanf 会读到我们的命令、
         或者干脆挂死。
         """
-        if not self._boot(hide_console=True):
-            # new-console 不生效 —— 退回「GDB 控制台可见」的老路子
-            self._kill_proc()
+        if os.name == "nt":
+            if not self._boot(hide_console=True):
+                # new-console 不生效 —— 退回「GDB 控制台可见」的老路子
+                self._kill_proc()
+                self._boot(hide_console=False)
+        else:
+            # Linux 不需要 new-console；程序 I/O 由 PTY 承担（见 _setup_pty）
             self._boot(hide_console=False)
 
     def _boot(self, hide_console: bool) -> bool:
@@ -168,12 +178,14 @@ class GdbSession:
 
         self._proc_gen += 1
         gen = self._proc_gen
+        self._close_pty()
         with self._cond:
             self._closed = False
             self._gdb_ready = False
             self._result = None
             self._events.clear()
             self._console.clear()
+            self._program_console.clear()
 
         self.proc = subprocess.Popen(
             cmd,
@@ -237,9 +249,103 @@ class GdbSession:
         #   保活进程守着那个控制台，等程序退出后再打印这行收尾提示。
         #   现在先保持和 Dev-C++「调试」时一致（窗口随程序一起消失），
         #   等主要功能稳定再加。
+        # Linux：给 inferior 一个 PTY，让 printf/scanf 正常工作
+        if os.name != "nt":
+            self._setup_pty()
+            self.console_mode = "pty" if self._pty_master is not None else "none"
+            return True
+
         own_console = self._gdb_set("new-console", "on")
         self.console_mode = "own" if own_console else "shared"
         return own_console
+
+    # ------------------------------------------------------------------
+    # PTY：给被调试程序一个真正的终端（Linux）
+    # ------------------------------------------------------------------
+
+    def _setup_pty(self) -> bool:
+        """创建 PTY 并把它设为 inferior 的终端。
+
+        Windows 用 new-console 给程序开独立控制台；Linux 没有这个概念，
+        标准做法是 `pty.openpty()` + `set inferior-tty`。这样：
+
+        - `printf` 的输出能被后台线程读进 console 缓冲，前端看得到；
+        - `scanf` 从 PTY 读，不会跟 GDB 的 MI 管道抢 stdin。
+        """
+        if os.name == "nt":
+            return False
+        try:
+            import pty
+        except Exception:
+            self._note_console("(cdbg) 当前平台没有 pty 模块，程序输出将不可见\n")
+            return False
+
+        try:
+            master, slave = pty.openpty()
+        except Exception as exc:
+            self._note_console("(cdbg) 创建 PTY 失败：%s\n" % exc)
+            return False
+
+        name = os.ttyname(slave)
+        result = self.send(
+            '-interpreter-exec console "set inferior-tty %s"' % name,
+            timeout=3.0, raise_on_timeout=False,
+        )
+        if not result or result.get("kind") == "error":
+            for fd in (master, slave):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self._note_console("(cdbg) 设置 inferior-tty 失败，程序输出将不可见\n")
+            return False
+
+        self._pty_master = master
+        self._pty_slave = slave
+        self._pty_stop.clear()
+        threading.Thread(
+            target=self._pty_read_loop, args=(master,), daemon=True
+        ).start()
+        self.console_mode = "pty"
+        return True
+
+    def _pty_read_loop(self, master: int) -> None:
+        """后台读 PTY，把程序输出放进 console 缓冲。"""
+        import select
+
+        while not self._pty_stop.is_set():
+            try:
+                ready, _, _ = select.select([master], [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            try:
+                data = os.read(master, 65536)
+            except (OSError, ValueError):
+                break
+            if not data:
+                break
+            text = data.decode("utf-8", errors="replace")
+            with self._cond:
+                self._program_console.append(text)
+                self._cond.notify_all()
+
+    def _close_pty(self) -> None:
+        """关闭 PTY 的两个 fd，避免反复重启时泄漏。"""
+        self._pty_stop.set()
+        for attr in ("_pty_master", "_pty_slave"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
+
+    def _note_console(self, text: str) -> None:
+        with self._cond:
+            self._program_console.append(text)
 
     def _gdb_set(self, name: str, value: str) -> bool:
         """设置一个 GDB 选项，返回是否成功。
@@ -308,6 +414,7 @@ class GdbSession:
                     stream.close()
             except Exception:
                 pass
+        self._close_pty()
 
     def __enter__(self):
         self.start()
@@ -439,7 +546,7 @@ class GdbSession:
         收不到就重发 —— 因为前面被丢弃的命令不会产生任何副作用。
         """
         for _ in range(attempts):
-            result = self.send("-gdb-show", timeout=timeout, raise_on_timeout=False)
+            result = self.send("-gdb-show pagination", timeout=timeout, raise_on_timeout=False)
             if result is not None and result.get("kind") != "error":
                 return True
             time.sleep(0.15)
@@ -559,11 +666,25 @@ class GdbSession:
             return events
 
     def console_text(self) -> str:
-        """取出累积的 console 输出（程序自己的 printf 等）。"""
+        """取出累积的程序输出（PTY 里的 printf / scanf 回显）。"""
         with self._cond:
-            text = "".join(self._console)
-            self._console.clear()
+            text = "".join(self._program_console)
+            self._program_console.clear()
             return text
+
+    def console_write(self, data: str) -> bool:
+        """把用户输入写进被调试程序的终端（PTY）。失败返回 False。"""
+        if not data:
+            return True
+        with self._console_io_lock:
+            master = self._pty_master
+            if master is None:
+                return False
+            try:
+                os.write(master, data.encode("utf-8", errors="replace"))
+                return True
+            except (OSError, ValueError):
+                return False
 
     # ------------------------------------------------------------------
     # 执行控制

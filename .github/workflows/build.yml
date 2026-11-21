@@ -3,6 +3,8 @@ name: Build cdbg (Windows standalone zip)
 on:
   # 本次手动触发
   workflow_dispatch:
+  # Pull Request：只跑 Linux 测试，不打包
+  pull_request:
   # 之后：每天北京时间凌晨 01:00（UTC 17:00）
   schedule:
     - cron: '0 17 * * *'
@@ -52,9 +54,36 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
+  test-linux:
+    name: Linux / Ubuntu x86-64 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gdb python3
+
+      - name: 环境检查
+        run: |
+          python3 --version
+          gcc --version | head -1
+          gdb --version | head -1
+          gdb --batch --nx -ex "python print(1)"
+
+      - name: 内存布局解析单测
+        run: python3 tests/test_memmap_linux.py
+
+      - name: 示例冒烟测试
+        run: python3 tests/test_examples.py
+
+      - name: 端到端测试
+        run: python3 tests/test_e2e.py
+
   build:
     needs: check
-    if: needs.check.outputs.should_build == 'true'
+    if: needs.check.outputs.should_build == 'true' && github.event_name != 'pull_request'
     runs-on: windows-latest
     env:
       PYTHONIOENCODING: utf-8   # runner 默认 cp1252，中文日志会抛 UnicodeEncodeError

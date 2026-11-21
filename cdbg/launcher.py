@@ -37,27 +37,37 @@ DEBUG_FLAGS = [
     "-fno-common",  # 多个 .c 文件的同名全局不再被合并，初学者更好理解
 ]
 
-#: 常见安装位置（Windows 上的 MSYS2 / MinGW）——
-#: 只在「配置没有 / 配置里的路径失效 / 扫描也没结果」时才用到，
-#: 正常情况走 `config/toolchain.conf`（由 compiler_scanner 生成）。
-_COMPILER_CANDIDATES = [
-    r"C:\msys64\ucrt64\bin\gcc.exe",
-    r"C:\msys64\mingw64\bin\gcc.exe",
-    r"C:\msys64\usr\bin\gcc.exe",
-    r"C:\MinGW\bin\gcc.exe",
-    r"C:\mingw64\bin\gcc.exe",
-    r"C:\ProgramData\mingw64\mingw64\bin\gcc.exe",
-]
+#: 可执行文件后缀：Windows 是 .exe，Linux 没有后缀
+EXE_SUFFIX = ".exe" if os.name == "nt" else ""
+
+#: 常见安装位置 —— 只在配置、PATH、扫描都没有结果时兜底。
+#: Windows 走 MSYS2 / MinGW；Linux 直接依赖 PATH，不猜安装目录。
+_COMPILER_CANDIDATES = (
+    [
+        r"C:\msys64\ucrt64\bin\gcc.exe",
+        r"C:\msys64\mingw64\bin\gcc.exe",
+        r"C:\msys64\usr\bin\gcc.exe",
+        r"C:\MinGW\bin\gcc.exe",
+        r"C:\mingw64\bin\gcc.exe",
+        r"C:\ProgramData\mingw64\mingw64\bin\gcc.exe",
+    ]
+    if os.name == "nt"
+    else []
+)
 
 #: 常见 GDB 位置
-_GDB_CANDIDATES = [
-    r"C:\msys64\ucrt64\bin\gdb.exe",
-    r"C:\msys64\mingw64\bin\gdb.exe",
-    r"C:\msys64\usr\bin\gdb.exe",
-    r"C:\MinGW\bin\gdb.exe",
-    r"C:\mingw64\bin\gdb.exe",
-    r"C:\ProgramData\mingw64\mingw64\bin\gdb.exe",
-]
+_GDB_CANDIDATES = (
+    [
+        r"C:\msys64\ucrt64\bin\gdb.exe",
+        r"C:\msys64\mingw64\bin\gdb.exe",
+        r"C:\msys64\usr\bin\gdb.exe",
+        r"C:\MinGW\bin\gdb.exe",
+        r"C:\mingw64\bin\gdb.exe",
+        r"C:\ProgramData\mingw64\mingw64\bin\gdb.exe",
+    ]
+    if os.name == "nt"
+    else []
+)
 
 
 class BuildError(RuntimeError):
@@ -424,17 +434,31 @@ def find_compiler() -> str:
     if configured:
         return configured
 
-    for name in ("gcc", "x86_64-w64-mingw32-gcc"):
+    for name in (("gcc", "x86_64-w64-mingw32-gcc") if os.name == "nt"
+                 else ("gcc", "cc", "clang")):
         found = _which(name)
         if found:
             return found
     for cand in _COMPILER_CANDIDATES:
         if os.path.isfile(cand):
             return cand
-    raise ToolNotFound(
-        "找不到 gcc。请安装 MSYS2 UCRT64 / MinGW-w64，"
-        "或运行 `python cdbg.py --scan-compiler` 让程序自己找一套，"
-        "也可以设置环境变量 CDBG_CC 指向 gcc.exe 的完整路径。"
+    raise ToolNotFound(_missing_tool_message("gcc"))
+
+
+def _missing_tool_message(tool: str) -> str:
+    """按平台给出安装建议。"""
+    env_name = "CDBG_CC" if tool == "gcc" else "CDBG_GDB"
+    if os.name == "nt":
+        return (
+            "找不到 %s。请安装 MSYS2 UCRT64 / MinGW-w64，"
+            "或运行 `python cdbg.py --scan-compiler` 让程序自己找一套，"
+            "也可以设置环境变量 %s 指向 %s.exe 的完整路径。"
+            % (tool, env_name, tool)
+        )
+    return (
+        "找不到 %s。请安装：sudo apt install gcc gdb（或 dnf install gcc gdb），"
+        "或设置环境变量 %s 指向 %s 的完整路径。"
+        % (tool, env_name, tool)
     )
 
 
@@ -455,24 +479,20 @@ def find_gdb() -> str:
 
     # 退一步：跟 gcc 放同一个 bin 目录的 gdb（配置里没写 gdb 字段时）
     try:
-        sibling = os.path.join(os.path.dirname(find_compiler()), "gdb.exe")
+        sibling = os.path.join(os.path.dirname(find_compiler()), "gdb" + EXE_SUFFIX)
         if os.path.isfile(sibling):
             return sibling
     except ToolNotFound:
         pass
 
-    for name in ("gdb", "x86_64-w64-mingw32-gdb"):
+    for name in (("gdb", "x86_64-w64-mingw32-gdb") if os.name == "nt" else ("gdb",)):
         found = _which(name)
         if found:
             return found
     for cand in _GDB_CANDIDATES:
         if os.path.isfile(cand):
             return cand
-    raise ToolNotFound(
-        "找不到 gdb。请安装 MSYS2 UCRT64 / MinGW-w64，"
-        "或运行 `python cdbg.py --scan-compiler`，"
-        "也可以设置环境变量 CDBG_GDB 指向 gdb.exe 的完整路径。"
-    )
+    raise ToolNotFound(_missing_tool_message("gdb"))
 
 
 # ---------------------------------------------------------------------------
@@ -549,16 +569,25 @@ def compile_source(
     timeout: int = 120,
     override_text: Optional[str] = None,
 ) -> BuildResult:
-    """把 .c 编译成 exe。
+    """把 .c 编译成可执行文件。
 
-    source 必须是 .c 文件；.exe 直接进入调试（不编译）。
+    输入判定：
+    - `.c` 源码 → 编译；
+    - Windows `.exe` / Linux 上「存在且可执行、不是源码」→ 直接调试。
     override_text 用于插桩：直接用给定的文本作为工作副本的内容。
     """
     source = os.path.abspath(source)
     if not os.path.isfile(source):
         raise BuildError("源码文件不存在：%s" % source)
 
-    if source.lower().endswith(".exe"):
+    is_source = source.lower().endswith(".c")
+    direct = False
+    if not is_source:
+        if os.name == "nt":
+            direct = source.lower().endswith(".exe")
+        else:
+            direct = os.access(source, os.X_OK)
+    if direct:
         # 已经是可执行文件，直接用（用户自备 -g 编译）
         return BuildResult(
             ok=True,
@@ -567,13 +596,18 @@ def compile_source(
             original_source=source,
             workdir=os.path.dirname(source),
         )
+    if not is_source:
+        raise BuildError(
+            "不支持的文件类型：%s\n"
+            "请传入 .c 源码，或一个已经编译好、带调试信息的可执行文件。" % source
+        )
 
     if workdir is None:
         workdir = make_workspace(source)
 
     stem = _ascii_safe(os.path.splitext(os.path.basename(source))[0])[:32] or "prog"
     copy_path = os.path.join(workdir, stem + ".c")
-    exe_path = os.path.join(workdir, stem + ".exe")
+    exe_path = os.path.join(workdir, stem + EXE_SUFFIX)
 
     # 源码副本：统一写成 UTF-8，避免 GDB 读取时的编码问题
     text = override_text if override_text is not None else _read_source_text(source)

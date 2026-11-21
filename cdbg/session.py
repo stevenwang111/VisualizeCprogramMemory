@@ -74,6 +74,10 @@ class DebugSession:
         #: 每次新起一个 inferior 都要先清空，否则可能对着上一个进程的
         #: 旧 PID 开火 —— Windows 会复用 PID，那枪就打偏了。
         self._target_pid: Optional[int] = None
+        #: 被调试程序的输出（PTY / 控制台）。按 offset 增量读取，
+        #: 程序退出后也保留最后的内容。
+        self._console_log: str = ""
+        self._console_lock = threading.Lock()
 
     def _log(self, category: str, message: str, fields: Optional[Dict[str, Any]] = None) -> None:
         """往操作日志里记一笔。任何异常都吞掉 —— 它只是观测者。"""
@@ -111,6 +115,8 @@ class DebugSession:
         from .launcher import _read_source_text, make_workspace
 
         workdir = self.workdir or make_workspace(self.source)
+        with self._console_lock:
+            self._console_log = ""
         self.original_source_path = self.source
         self.source_lines = _read_lines(self.source)
 
@@ -595,14 +601,14 @@ class DebugSession:
         }
 
     def _force_kill(self) -> Dict[str, Any]:
-        """绕开 GDB，直接 taskkill /F 掉被调试程序。
+        """绕开 GDB，从外部强制结束被调试程序。
 
         给「停止执行」的长按用。正常停止是「interrupt → console kill」，
         几十毫秒就能确认；这条路只在 **GDB 自己卡死**时才有用：
         程序卡在某个系统调用里、`*stopped` 事件迟迟不来、console kill 回
         error，这时候只有从外面把进程砍掉，GDB 才会跟着醒过来。
 
-        只杀 inferior，不杀 gdb.exe —— GDB 活下来，符号表和断点都还在，
+        只杀 inferior，不杀 GDB —— GDB 活下来，符号表和断点都还在，
         用户可以直接接着按「调试」重来。
         """
         if self.gdb is None:
@@ -861,6 +867,48 @@ class DebugSession:
             return [ln - self.line_offset for ln in self.gdb.user_breakpoint_lines()]
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # 被调试程序的终端
+    # ------------------------------------------------------------------
+
+    def console_read(self, offset: int = 0) -> Dict[str, Any]:
+        """增量读取程序输出。
+
+        `offset` 是上一次读到的位置（字符数）。返回 `offset` 之后的新内容，
+        以及新的 offset —— 前端轮询时不用重复显示旧输出。
+        """
+        if self.gdb is not None:
+            try:
+                chunk = self.gdb.console_text()
+            except Exception:
+                chunk = ""
+            if chunk:
+                with self._console_lock:
+                    self._console_log += chunk
+        with self._console_lock:
+            text = self._console_log
+        try:
+            start = max(0, min(int(offset or 0), len(text)))
+        except (TypeError, ValueError):
+            start = 0
+        return {
+            "ok": True,
+            "text": text[start:],
+            "offset": len(text),
+            "mode": self.gdb.console_mode if self.gdb is not None else "none",
+        }
+
+    def console_write(self, data: str) -> Dict[str, Any]:
+        """把用户输入写进程序的 stdin（Linux PTY）。"""
+        if self.gdb is None:
+            return {"ok": False, "message": "调试会话未启动"}
+        if not data:
+            return {"ok": True}
+        ok = self.gdb.console_write(data)
+        if not ok:
+            return {"ok": False, "message": "程序没有可写的终端（Windows 请用程序自己的控制台窗口）"}
+        return {"ok": True}
 
     def state(self) -> Dict[str, Any]:
         with self._lock:

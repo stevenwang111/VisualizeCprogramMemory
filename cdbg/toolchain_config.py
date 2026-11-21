@@ -179,7 +179,10 @@ def scan_and_write(interactive: bool = False, select: int = 0,
 
     if not tcs:
         _say("[工具链] 没找到任何 C 编译器。")
-        _say("         请安装 MSYS2 UCRT64 / MinGW-w64，或设置环境变量 CDBG_CC 指向 gcc.exe。")
+        if os.name == "nt":
+            _say("         请安装 MSYS2 UCRT64 / MinGW-w64，或设置环境变量 CDBG_CC 指向 gcc.exe。")
+        else:
+            _say("         请安装：sudo apt install gcc gdb，或设置环境变量 CDBG_CC 指向 gcc。")
         return None
 
     picked = None

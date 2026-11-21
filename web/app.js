@@ -322,7 +322,8 @@
   /* 正常停止走「中断 → GDB kill」，实测 0.2~0.4 秒就能确认死透，
      日常根本用不着别的。长按 3 秒这条是**兜底**：万一 GDB 自己卡住
      （程序陷在某个系统调用里、`console kill` 回 error），
-     只有从外面 taskkill /F 把进程砍掉，GDB 才会跟着醒过来。
+     只有从外面强制结束进程（Windows 用 taskkill /F，Linux 用 SIGKILL），
+     GDB 才会跟着醒过来。
 
      交互上刻意不做「长按才有反应」：按下就开始计时，手指抬起时
      不满 3 秒就按普通「停止执行」处理 —— 和以前的点击手感完全一致，
@@ -472,6 +473,113 @@
   }
 
   /* ---------------------------------------------------------
+     被调试程序的终端（Linux PTY）
+     --------------------------------------------------------- */
+
+  let consoleOffset = 0;
+  let consoleTimer = 0;
+
+  function setConsoleHint(mode) {
+    const hint = document.getElementById("console-hint");
+    const input = document.getElementById("console-input");
+    const form = document.getElementById("console-form");
+    if (!hint) return;
+    const writable = mode === "pty";
+    if (input) input.disabled = !writable;
+    if (form) form.classList.toggle("disabled", !writable);
+    if (mode === "pty") {
+      hint.textContent = "终端已连接 · 在这里输入程序需要的字符";
+    } else if (mode === "own") {
+      hint.textContent = "程序在独立控制台窗口中运行";
+    } else if (mode === "shared") {
+      hint.textContent = "程序与 GDB 共用控制台";
+    } else {
+      hint.textContent = "程序输出不可用（当前平台没有终端）";
+    }
+  }
+
+  async function pollConsole() {
+    const out = document.getElementById("console-output");
+    if (!out) return;
+    try {
+      const resp = await fetch("/api/console?offset=" + consoleOffset);
+      const data = await resp.json();
+      if (!data.ok) return;
+      // 会话重启后服务端日志会清零，offset 比本地小 —— 本地也清空重新来
+      if (data.offset < consoleOffset) {
+        out.textContent = "";
+        consoleOffset = 0;
+        return;
+      }
+      if (data.text) {
+        out.textContent += data.text;
+        // 防止长时间运行把浏览器拖垮，只保留最后 200KB
+        if (out.textContent.length > 200000) {
+          out.textContent = out.textContent.slice(-200000);
+        }
+        out.scrollTop = out.scrollHeight;
+      }
+      consoleOffset = data.offset;
+      setConsoleHint(data.mode || "none");
+    } catch (e) {
+      // 服务没起来时安静等待下一轮
+    }
+  }
+
+  function bindConsole() {
+    const panel = document.getElementById("console-panel");
+    const form = document.getElementById("console-form");
+    const input = document.getElementById("console-input");
+    const clear = document.getElementById("btn-console-clear");
+    const toggle = document.getElementById("btn-console-toggle");
+    if (!panel) return;
+
+    try {
+      if (localStorage.getItem("cdbg-console-collapsed") === "1") {
+        panel.classList.add("collapsed");
+        if (toggle) toggle.textContent = "展开";
+      }
+    } catch (e) { /* ignore */ }
+
+    if (toggle) {
+      toggle.addEventListener("click", () => {
+        const collapsed = panel.classList.toggle("collapsed");
+        toggle.textContent = collapsed ? "展开" : "收起";
+        try {
+          localStorage.setItem("cdbg-console-collapsed", collapsed ? "1" : "0");
+        } catch (e) { /* ignore */ }
+      });
+    }
+
+    if (clear) {
+      clear.addEventListener("click", () => {
+        const out = document.getElementById("console-output");
+        if (out) out.textContent = "";
+      });
+    }
+
+    if (form && input) {
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const value = input.value;
+        input.value = "";
+        if (!value) return;
+        try {
+          await fetch("/api/console", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ data: value + "\n" }),
+          });
+        } catch (e) { /* ignore */ }
+        pollConsole();
+      });
+    }
+
+    if (!consoleTimer) consoleTimer = setInterval(pollConsole, 600);
+    pollConsole();
+  }
+
+  /* ---------------------------------------------------------
      启动
      --------------------------------------------------------- */
 
@@ -482,6 +590,7 @@
     } catch (e) { /* ignore */ }
 
     bind();
+    bindConsole();
 
     // 回看历史快照：只影响显示，不改变调试状态
     Timeline.setOnView((snap) => {

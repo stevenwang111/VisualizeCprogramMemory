@@ -27,7 +27,7 @@
   </div>
 
   <!-- 程序卡在 scanf 之类的阻塞调用上时，告诉用户该去控制台看一眼 -->
-  <span id="busy-hint" class="busy-hint" hidden>指令运行中，请检查程序是否在等待输入，如果是，请到控制台输入一些字符</span>
+  <span id="busy-hint" class="busy-hint" hidden>指令运行中，请检查程序是否在等待输入；Linux 可在下方「程序输出」面板输入</span>
 
   <div class="status">
     <span id="status-loc" class="loc">—</span>
@@ -109,6 +109,24 @@
       <h2>教学提示</h2>
     </div>
     <div class="lesson-list" id="lesson-list"></div>
+  </section>
+
+  <!-- ============ 被调试程序的终端（Linux PTY / Windows 独立控制台） ============ -->
+  <section class="panel panel-console" id="console-panel">
+    <div class="panel-head">
+      <h2>程序输出</h2>
+      <span class="hint" id="console-hint">—</span>
+      <button id="btn-console-clear" class="btn ghost" title="清空程序输出">✕</button>
+      <button id="btn-console-toggle" class="btn ghost" title="折叠 / 展开程序输出">收起</button>
+    </div>
+    <div class="console-body">
+      <pre class="console-output" id="console-output"></pre>
+      <form class="console-input-row" id="console-form" autocomplete="off">
+        <input id="console-input" class="console-input" type="text"
+               placeholder="在这里输入程序需要的输入，回车发送">
+        <button class="btn" type="submit">发送</button>
+      </form>
+    </div>
   </section>
 
 </main>
