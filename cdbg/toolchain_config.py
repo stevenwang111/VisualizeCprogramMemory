@@ -126,6 +126,10 @@ def check(sel: dict):
         return False, "配置里没写 gdb 路径（调试器需要它）"
     if not os.path.isfile(gdb):
         return False, "配置里的 gdb 在这台机器上不存在：%s" % gdb
+    if sel.get("gdb的Python支持") == "无":
+        # 能编译能中断，但采集变量的探针靠注入 gdb 的 Python 脚本，这条不满足
+        # 就等于「调试器起来了，面板一片空白」—— 按不可用处理，去补装。
+        return False, "配置里这套 gdb 不带 Python 支持，采集不到变量"
     return True, ""
 
 
@@ -143,9 +147,13 @@ def _say(message: str = "") -> None:
 
 
 def _pick(tcs):
-    """从扫描结果里挑一套：能编译 + 能调试 + gdb 带 Python，越好越靠前。"""
+    """从扫描结果里挑一套：能编译 + 能调试 + gdb 带 Python，越好越靠前。
+
+    `usable` 由扫描器判定（MSVC、不带 Python 的 gdb 都算不可用）—— 这里必须
+    一起看，不然「只有 cl.exe 的机器」会静默选中一个调试信息格式对不上的编译器。
+    """
     def usable(tc):
-        return bool(tc.exe) and os.path.isfile(tc.exe)
+        return getattr(tc, "usable", True) and bool(tc.exe) and os.path.isfile(tc.exe)
 
     def has_gdb(tc):
         gdb = (tc.tools or {}).get("gdb") or ""
@@ -177,12 +185,20 @@ def scan_and_write(interactive: bool = False, select: int = 0,
         _say("[工具链] 扫描失败：%s" % exc)
         return None
 
-    if not tcs:
-        _say("[工具链] 没找到任何 C 编译器。")
+    # 一套「能编译 + 能调试」的都没有（只有 MSVC、gdb 不带 Python、或者压根
+    # 没装编译器）→ 问一句要不要补装。这是扫描器的判定，这里只负责转达。
+    if not any(getattr(t, "usable", True) for t in tcs):
+        from .compiler_scanner import ensure_toolchain
+
+        # 补装包是 Windows 的 MinGW-w64；Linux 上缺编译器就交给包管理器
+        if os.name == "nt" and ensure_toolchain(tcs):
+            tcs = scan_all()
+    if not any(getattr(t, "usable", True) for t in tcs):
+        _say("[工具链] 没有一套同时能编译、能调试的工具链（gdb 必须带 Python）。")
         if os.name == "nt":
-            _say("         请安装 MSYS2 UCRT64 / MinGW-w64，或设置环境变量 CDBG_CC 指向 gcc.exe。")
+            _say("         自己装 MSYS2 UCRT64 / MinGW-w64，或设置 CDBG_CC 指向 gcc.exe。")
         else:
-            _say("         请安装：sudo apt install gcc gdb，或设置环境变量 CDBG_CC 指向 gcc。")
+            _say("         请安装：sudo apt install gcc gdb，或设置 CDBG_CC 指向 gcc。")
         return None
 
     picked = None
@@ -200,7 +216,7 @@ def scan_and_write(interactive: bool = False, select: int = 0,
     if picked is None:
         picked = _pick(tcs)
     if picked is None:
-        _say("[工具链] 找到了编译器，但没有一套同时带 gcc 和 gdb，无法调试。")
+        _say("[工具链] 找到的编译器都不能用来调试（原因见上），已跳过。")
         return None
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

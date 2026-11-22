@@ -124,7 +124,7 @@ cdbg/
 | `gdb_probe.py` | 跑在 **GDB 进程内**的 Python：变量、栈帧、字节、段边界 | 这里是 GDB 的 Python 2/3 环境，不是主进程的 Python；异常会静默，注意兜底 |
 | `launcher.py` | 工具查找、ASCII 工作目录、编译、编译/链接错误诊断 | `DEBUG_FLAGS` 里每个 flag 都有教学含义，别随手删。**gcc/gdb 的解析入口在这里**（`find_compiler` / `find_gdb`），顺序是 环境变量 → 配置 → PATH → 常见目录 |
 | `toolchain_config.py` | 读 `config/toolchain.conf`，首次开箱时自动扫描 | 判断标准是「按配置里的路径能不能真的找到那个 exe」；进程内只扫一次 |
-| `compiler_scanner.py` | 扫全盘找 GCC/Clang/MSVC，探测版本、头文件、gdb 是否带 Python | 原来是个独立工具，现在是包内模块；TUI 由 `--scan-compiler` 调起 |
+| `compiler_scanner.py` | 扫全盘找 GCC/Clang/MSVC，探测版本、头文件、gdb 是否带 Python；判「可用」与否，必要时补装 MinGW-w64 | 原来是个独立工具，现在是包内模块；TUI 由 `--scan-compiler` 调起。**「可用」= 编译出来的程序 GDB 能读到 DWARF**：MSVC（PDB）、无 gdb、gdb 不带 Python 都判不可用，只占位不自动选中。补装包版本写死（`TOOLCHAIN_PACKAGE`），换版本前先跑一遍 `tests/test_e2e.py` —— gdb 18.1 改了 sections/mappings 的输出格式，会让「段布局」和「内存区域分区」两块变空。**加速只在大陆且用户同意时用**，节点是 gh-proxy.org（第三方公共反代），界面上必须写明来源，`CDBG_NO_ACCELERATE=1` 可强制直连 |
 | `instrument.py` | 往源码插一行 `#include "cdbg_shim.h"` | 有失败降级逻辑；插桩只记录、不改变内存布局 |
 | `collector.py` | 探针数据 + memmap + heap ledger → Snapshot | 四个教学分区在这里拼装 |
 | `snapshot.py` | 全部 dataclass 与 JSON 序列化 | **前后端唯一契约**，改字段必须同步前端渲染 |
