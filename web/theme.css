@@ -1145,6 +1145,9 @@ html[data-theme="light"] .var-chip.hot { box-shadow: 0 0 0 2px #16202c, 0 2px 10
 }
 .quip-bar[hidden] { display: none; }
 .quip-bar:hover { opacity: .85; }
+/* 亮色主题：白字在白底上等于消失，换成和正文同一个深色；
+   靠外层 .38 的透明度压淡，观感和暗色主题一致。 */
+html[data-theme="light"] .quip-bar { color: #1f2733; }
 
 .quip-text {
   flex: 1 1 auto;
