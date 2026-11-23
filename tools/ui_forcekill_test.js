@@ -28,11 +28,11 @@ const URL = process.argv[2] || "http://127.0.0.1:8786/";
   });
   console.log("卡在等输入", JSON.stringify(runState));
 
-  // 按住 3.3 秒
+  // 按住 1.3 秒（阈值 1 秒）
   const box = await (await page.$("#btn-stop")).boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(3300);
+  await page.waitForTimeout(1300);
   await page.mouse.up();
   await page.waitForTimeout(1200);
 

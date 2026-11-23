@@ -18,6 +18,8 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .oplogger import OpLogger
+from .quips import fill as fill_quip
+from .quips import lines as quip_lines
 from .session import DebugSession
 from .snapshot import Snapshot
 
@@ -146,6 +148,16 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_json(self.session.console_read(offset))
         if route == "/api/events":
             return self._serve_sse()
+        if route == "/api/quips":
+            # 底部那行小字：一次给全，前端自己随机 —— 没必要每换一条就发一次请求。
+            name = ""
+            if self.session is not None:
+                name = os.path.basename(
+                    getattr(self.session, "original_source_path", "") or ""
+                )
+            return self._send_json(
+                {"ok": True, "lines": [fill_quip(s, name) for s in quip_lines()]}
+            )
         if route == "/api/oplog":
             logger = getattr(self, "oplog", None)
             if logger is None:

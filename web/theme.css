@@ -129,7 +129,7 @@ body {
 
 .controls { display: flex; gap: 6px; }
 
-/* 「指令运行中」提示：按钮全灰的时候，说明为什么灰 */
+/* 「程序运行中」提示：卡住超过 3 秒会变成这句的「卡住了？」版本 */
 .busy-hint {
   font-size: 11px;
   line-height: 1.4;
@@ -142,6 +142,12 @@ body {
   animation: busy-pulse 1.8s ease-in-out infinite;
 }
 .busy-hint[hidden] { display: none; }
+/* 卡住了：跟「停止执行」同一个红，提醒你现在只能靠长按它 */
+.busy-hint.stuck {
+  color: #e5534b;
+  font-weight: 600;
+  animation-duration: 1.1s;
+}
 
 @keyframes busy-pulse {
   0%, 100% { opacity: .95; }
@@ -181,7 +187,7 @@ body {
   border-color: #e5534b;
 }
 
-/* 「长按 3 秒 = 强制结束」的进度条。
+/* 「长按 1 秒 = 强制结束」的进度条。
    注意 .hold-fill 必须是绝对定位的子元素，且 pointer-events:none ——
    否则它会挡在按钮和手指之间，pointerup 收不到。
    填充从左侧往右长，用的是按钮自己的红色，不另造一种颜色。 */
@@ -229,6 +235,11 @@ body {
   color: var(--accent);
   border: 1px solid transparent;
   white-space: nowrap;
+  /* 提示语可能是一整句话（「当前停在 scanf 这类系统函数里…」），
+     不限宽会把整个顶栏撑变形。超了省略，完整内容挂在 title 上。 */
+  max-width: min(52ch, 46vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .badge.running { background: rgba(255,159,67,.15); color: #ff9f43; }
 .badge.exited  { background: rgba(110,118,134,.18); color: var(--fg-dim); }
@@ -454,6 +465,9 @@ html[data-theme="light"] .src-line.has-error .src-text { color: #8a1020; }
   grid-row: 4;
   border-top: 1px solid var(--border);
 }
+/* `.panel` 自带 display:flex，会把 [hidden] 的 display:none 盖掉 ——
+   没有这条，Windows 上「收起来」的那块面板还会占着高度。 */
+.panel-console[hidden] { display: none; }
 .panel-console .panel-head { gap: 8px; }
 .panel-console .panel-head h2 { flex: 0 0 auto; }
 .panel-console .panel-head .hint { flex: 1 1 auto; }
@@ -1105,3 +1119,52 @@ html[data-theme="light"] .var-chip.hot { box-shadow: 0 0 0 2px #16202c, 0 2px 10
   .panel-side   { grid-column: 2; grid-row: 4; }
   .panel-console { grid-column: 1 / -1; grid-row: 5; }
 }
+
+/* ---------------- 底部小字（彩蛋）----------------
+
+   排法是「[隐藏] 那句话」，整条贴着窗口左边框（所以左边不留 padding），
+   字号比源码（12.5px）小一号。
+   故意不显眼：颜色贴着背景、平时半透明；鼠标移上去才亮起来 ——
+   想看清的人看得见，不想看的人不会被打扰。 */
+
+.quip-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;                 /* 「隐藏」和那句话挨着，别拉出一条空档 */
+  padding: 0 8px 0 0;       /* 左边不留白：按钮贴住窗口外框 */
+  background: var(--bg);
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #ffffff;
+  opacity: .38;
+  transition: opacity .18s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.quip-bar[hidden] { display: none; }
+.quip-bar:hover { opacity: .85; }
+
+.quip-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  letter-spacing: .2px;
+}
+
+.quip-hide {
+  flex: 0 0 auto;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.quip-hide:hover { border-color: var(--border); opacity: 1; }
+.quip-bar:hover .quip-hide { opacity: 1; }

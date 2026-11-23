@@ -73,7 +73,7 @@ const URL = process.argv[2] || "http://127.0.0.1:8785/";
   const box = await btn.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(1600);
+  await page.waitForTimeout(500);
   const mid = await page.evaluate(() => {
     const f = document.querySelector("#btn-stop .hold-fill");
     return {
@@ -82,8 +82,8 @@ const URL = process.argv[2] || "http://127.0.0.1:8785/";
     };
   });
   await page.screenshot({ path: "shot_hold_mid.png" });
-  console.log("按住 1.6s", JSON.stringify(mid));
-  await page.waitForTimeout(1700);          // 累计 3.3s，越过阈值
+  console.log("按住 0.5s", JSON.stringify(mid));
+  await page.waitForTimeout(800);           // 累计 1.3s，越过阈值（1s）
   await page.mouse.up();
   await page.waitForTimeout(900);
   console.log("长按释放后", JSON.stringify(await dom()));

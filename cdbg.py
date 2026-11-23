@@ -155,6 +155,20 @@ def main(argv=None):
         gdb_path=args.gdb,
     )
 
+    # 编译要等一两秒，空着也是空着 —— 随机抖三条「正在…」。
+    # 顺手把 {file_name} 换成真文件名（上游词库是给 LLM 状态条用的）。
+    #
+    # --headless 不打：那是给 IDE 读的机器输出，别往里掺废话。
+    if not args.headless:
+        try:
+            from cdbg import quips
+
+            for quip in quips.sample(3, file_name=os.path.basename(source)):
+                print("  " + quip)
+            print()
+        except Exception:
+            pass
+
     build_ok = True
     try:
         print("正在编译并启动调试会话...")

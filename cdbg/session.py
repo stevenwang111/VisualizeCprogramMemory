@@ -50,6 +50,19 @@ class DebugSession:
         self.error_text: str = ""
 
         self._lock = threading.RLock()
+        #: 「会等程序停下」的命令用这把锁串行化。
+        #:
+        #: 刻意和 `_lock` 分开：`_lock` 护着状态字段，必须秒进秒出；
+        #: 单步 / 跳出这类命令要等好几秒，占着 `_lock` 的话，
+        #: 「停止执行」「重启」和 /api/state 会一起被堵死 ——
+        #: 那正是「程序卡住、界面也一起卡住」的来源。
+        self._exec_lock = threading.Lock()
+        #: 中止信号：置位后，所有正在等 *stopped 的命令立刻放弃等待。
+        #:
+        #: 「停止执行」「重启」「清空界面」在动手之前先把它置位，
+        #: 这样它们不用等前一条命令自己超时（最长十几秒）。
+        #: 每条新命令开始时清掉。
+        self._abort_wait = threading.Event()
         self._listeners: List[Callable[[Snapshot], None]] = []
         self._running = False
         self._error: Optional[str] = None
@@ -335,121 +348,316 @@ class DebugSession:
           finish   跳出函数
           goto     运行到光标行
           continue 继续运行
-          stop     停止执行
+          stop     停止执行（短按；长按走 force-kill）
           break    设置/取消断点
           restart  重新开始
           clear    清空界面（扔掉这次调试的画面，源码和断点留着）
-          force-kill  taskkill /F 掉被调试程序（「停止」长按 3 秒用）
+          force-kill  taskkill /F 掉被调试程序（「停止」长按 1 秒用）
+
+        锁的规矩（「卡住」问题的根子，别改回去）：
+
+        - `_lock` 只护状态字段，持有时间必须是毫秒级；
+        - `_exec_lock` 只串行化「会等程序停下」的命令；
+        - **等程序那几秒不能抱着上面任何一把锁**。
+
+        最后一条是关键。以前整条命令（含那个 8 秒的等待）都裹在
+        `with self._lock` 里，于是在 scanf 上按「跳出函数」时，
+        停止按钮、重启按钮、连 /api/state 全被堵住 —— 日志里那次
+        11 秒的 finish 就是这么来的。
         """
         if self.gdb is None:
             return {"ok": False, "message": "调试会话未启动"}
 
+        # 四条「救命」命令：随时可用，不排队。
+        # 它们要能打断正在等待的那条命令，所以放在 _exec_lock 之前。
+        if cmd == "stop":
+            return self._stop_execution()
+        if cmd == "force-kill":
+            return self._force_kill()
+        if cmd == "restart":
+            return self._restart_command()
+        if cmd == "clear":
+            return self._clear_view()
+
+        if cmd == "break":
+            with self._exec_lock:
+                return self._toggle_breakpoint(
+                    int(kwargs.get("line", 0) or 0),
+                    bool(kwargs.get("on", True)),
+                )
+
         # 继续运行可能长时间不停（比如程序里没有更多断点了），
-        # 所以给个较短的等待时间，避免界面卡住不动。
+        # 所以给个较短的等待时间，避免界面一直等。
         wait = 1.0 if cmd == "continue" else 8.0
 
         try:
-            with self._lock, self._event_lock:
-                # 清掉上一次命令残留的事件，否则会把旧的 *stopped 当成这次的
-                self.gdb.drain_events()
-                # 命令线程要自己收尾，监视线程别跟它抢事件
-                self._async_wait = False
+            with self._exec_lock:
+                # 新命令开始 —— 上一条「停止」留下的中止信号作废
+                self._abort_wait.clear()
+
+                # 发 run 之前得先把上一次还在跑的程序停掉。
+                # 这一步最长一两秒，刻意放在锁外面做。
                 if cmd == "debug":
-                    self._start_debugging()
-                elif cmd == "run":
-                    self.gdb.run()
-                elif cmd == "next":
-                    self.gdb.step_over()
-                elif cmd == "step":
-                    self.gdb.step_into()
-                elif cmd == "finish":
-                    self.gdb.step_out()
-                elif cmd == "continue":
-                    self.gdb.continue_()
-                    # 继续运行可能长时间不停（比如程序在等 scanf 输入），
-                    # 所以不等它停下 —— 状态变化由 SSE 异步推给界面。
-                    # （Dev-C++ 也是这样：F4 按下就返回，不卡界面。）
-                    self._running = True
-                    self.state_name = "running"
-                    self._async_wait = True
-                    self._log("PHASE", "继续运行", {"phase": "running"})
-                    # 立刻把「运行中」这个状态推出去 —— 否则界面还是旧的
-                    self._broadcast_phase()
-                    return {"ok": True, "message": ""}
-                elif cmd == "goto":
-                    line = int(kwargs.get("line", 0) or 0)
-                    if not line:
-                        return {"ok": False, "message": "没有指定目标行"}
-                    # 换算成工作副本的坐标（插桩会整体下移行号）
-                    self.gdb.run_to_line(line + self.line_offset)
-                elif cmd == "break":
-                    return self._toggle_breakpoint(
-                        int(kwargs.get("line", 0) or 0),
-                        bool(kwargs.get("on", True)),
-                    )
-                elif cmd == "stop":
-                    # 程序早就退出了的话，停止没什么可做的 ——
-                    # 保持「已退出」的状态，别把界面状态改乱。
-                    if self.state_name == "exited":
-                        return {"ok": True, "message": "程序已经退出了"}
-                    if self.state_name == "not-started":
-                        # 连跑都没跑过，没有可杀的东西 —— 直接返回，
-                        # 别白等一轮 kill 的超时。
-                        return {"ok": True, "message": "程序还没开始运行"}
-                    # kill 现在是「中断 → 杀掉 → 等退出事件」的同步流程，
-                    # 几十毫秒就能确认。以前它是发后不理，导致界面上
-                    # 报「已停止执行」而程序还在跑，接着点调试又起不来。
-                    dead = self.gdb.kill()
-                    self._running = False
-                    self.state_name = "stopped"
-                    self._async_wait = False
-                    # 中断那一下探针会写一份「停在 ntdll」的快照。
-                    # 它可能在 kill 返回之后才落盘，所以等文件稳定再同步，
-                    # 否则下一条命令会立刻读到这份「已退出」的旧快照。
-                    self.gdb.sync_settled()
+                    self._stop_previous()
+
+                early: Optional[Dict[str, Any]] = None
+                with self._lock, self._event_lock:
+                    # 清掉上一次命令残留的事件，否则会把旧的 *stopped 当成这次的
                     self.gdb.drain_events()
-                    self._publish_stopped_snapshot()
-                    self._log("PHASE", "停止执行", {
-                        "phase": "stopped", "killed": 1 if dead else 0,
-                    })
-                    return {
-                        "ok": True,
-                        "message": "已停止执行" if dead else "已发出停止指令，但没等到程序退出",
-                        "phase": "stopped",
-                        "killed": bool(dead),
-                    }
-                elif cmd == "restart":
-                    self._restart()
-                elif cmd == "clear":
-                    # 清空界面：不等通用采集，直接返回 —— 否则后面的
-                    # _collect_and_broadcast 会立刻把刚扔掉的那份快照捡回来。
-                    return self._clear_view()
-                elif cmd == "force-kill":
-                    return self._force_kill()
-                else:
-                    return {"ok": False, "message": "未知命令: %s" % cmd}
+                    # 命令线程要自己收尾，监视线程别跟它抢事件
+                    self._async_wait = False
+                    if cmd == "debug":
+                        self._start_debugging()
+                    elif cmd == "run":
+                        self.gdb.run()
+                    elif cmd == "next":
+                        self.gdb.step_over()
+                    elif cmd == "step":
+                        self.gdb.step_into()
+                    elif cmd == "finish":
+                        # 跳不出去的函数（scanf 之流）先拦下来 ——
+                        # 否则 GDB 会一直等到它返回，而它多半在等人输入。
+                        early = self._finish_guard()
+                        if early is None:
+                            self.gdb.step_out()
+                    elif cmd == "continue":
+                        self.gdb.continue_()
+                        # 继续运行可能长时间不停（比如程序在等 scanf 输入），
+                        # 所以不等它停下 —— 状态变化由 SSE 异步推给界面。
+                        # （Dev-C++ 也是这样：F4 按下就返回，不卡界面。）
+                        self._running = True
+                        self.state_name = "running"
+                        self._async_wait = True
+                        self._log("PHASE", "继续运行", {"phase": "running"})
+                        # 立刻把「运行中」这个状态推出去 —— 否则界面还是旧的
+                        self._broadcast_phase()
+                        return {"ok": True, "message": ""}
+                    elif cmd == "goto":
+                        line = int(kwargs.get("line", 0) or 0)
+                        if not line:
+                            return {"ok": False, "message": "没有指定目标行"}
+                        # 换算成工作副本的坐标（插桩会整体下移行号）
+                        self.gdb.run_to_line(line + self.line_offset)
+                    else:
+                        return {"ok": False, "message": "未知命令: %s" % cmd}
+
+                if early is not None:
+                    # 前置检查没过（当前这一帧跳不出去）—— 命令根本没发给 GDB，
+                    # 立刻回话，界面不会有任何等待。
+                    self._log("CMD", "跳出被拦下", {"msg": early.get("message", "")})
+                    return early
+
+                # 等程序停下来。等不到就告诉前端「可能卡在等输入」——
+                # 否则提示自己消失，用户完全不知道发生了什么。
+                stopped = self._collect_and_broadcast(wait=wait)
+
+                aborted = self._abort_wait.is_set()
+                if not stopped and not aborted:
+                    # 没等到程序停下：它要么还在慢慢跑，要么卡在 scanf 上等人输入。
+                    # 把收尾交给后台监视线程 —— 等它哪天真停下来（断点命中 /
+                    # 输入完成），界面还能自己更新，不用再点一次按钮。
+                    with self._lock:
+                        self._async_wait = True
+
+                result: Dict[str, Any] = {
+                    "ok": True,
+                    "message": "",
+                    "waiting": (not stopped) and (not aborted),
+                }
+                if not stopped and not aborted:
+                    # 等不到 *stopped：程序多半卡在 scanf / getline 上等人输入。
+                    # 记一笔，复盘时能立刻区分「命令很慢」和「在等人」。
+                    self._log("WAIT", "没等到程序停下（可能在等输入）", {"cmd": cmd})
+
+                # 「运行到光标」：把光标挪到程序**真正停下**的那一行。
+                # 光标指在空行 / 声明行上时，GDB 会吸附到下一个有代码的行，
+                # 不回报的话界面就会一直显示「光标在 18 行、程序停在 19 行」。
+                if cmd == "goto" and stopped:
+                    with self._lock:
+                        snap = self.snapshot
+                    if snap is not None and snap.current_line:
+                        result["line"] = snap.current_line
+                return result
         except GdbError as exc:
             return {"ok": False, "message": str(exc)}
 
-        # 等程序停下来。等不到就告诉前端「可能卡在等输入」——
-        # 否则按钮灰着、提示却自己消失，用户完全不知道发生了什么。
-        stopped = self._collect_and_broadcast(wait=wait)
+    # ------------------------------------------------------------------
+    # 「救命」命令：停止 / 强制结束 / 重启 / 清空
+    # ------------------------------------------------------------------
 
-        result: Dict[str, Any] = {"ok": True, "message": "", "waiting": not stopped}
-        if not stopped:
-            # 等不到 *stopped：程序多半卡在 scanf / getline 上等人输入。
-            # 记一笔，复盘时能立刻区分「命令很慢」和「在等人」。
-            self._log("WAIT", "没等到程序停下（可能在等输入）", {"cmd": cmd})
+    def _stop_execution(self) -> Dict[str, Any]:
+        """停止执行 —— 短按和长按的「先手」都走这里。
 
-        # 「运行到光标」：把光标挪到程序**真正停下**的那一行。
-        # 光标指在空行 / 声明行上时，GDB 会吸附到下一个有代码的行，
-        # 不回报的话界面就会一直显示「光标在 18 行、程序停在 19 行」。
-        if cmd == "goto" and stopped:
-            with self._lock:
-                snap = self.snapshot
-            if snap is not None and snap.current_line:
-                result["line"] = snap.current_line
-        return result
+        这条命令必须**随时**能走通，所以它不等 `_exec_lock`：
+
+        1. 先放中止信号，让正在等 *stopped 的那条命令立刻放弃
+           （比如停在 scanf 上按「跳出函数」，那条命令会等十几秒）；
+        2. 再走 interrupt → kill，几十毫秒就能确认死透。
+
+        这个顺序是「按钮点了没反应、只能关掉重开」的解药：
+        以前停止排在命令锁后面，前一条命令不超时，它就一动不动。
+        """
+        if self.gdb is None:
+            return {"ok": False, "message": "调试会话未启动"}
+
+        # 程序早就退出了 / 连跑都没跑过 —— 没有可杀的东西，别白等一轮超时
+        if self.state_name == "exited":
+            return {"ok": True, "message": "程序已经退出了", "phase": "exited"}
+        if self.state_name == "not-started":
+            return {"ok": True, "message": "程序还没开始运行", "phase": "not-started"}
+
+        self._abort_wait.set()
+        try:
+            # kill 是「中断 → 杀掉 → 等退出事件」的同步流程，几十毫秒就能确认。
+            # 以前它是发后不理，导致界面上报「已停止执行」而程序还在跑，
+            # 接着点调试又起不来。
+            dead = self.gdb.kill()
+        except GdbError:
+            dead = False
+        except Exception:
+            dead = False
+
+        with self._lock:
+            self._running = False
+            self.state_name = "stopped"
+            self._async_wait = False
+            self._restart_seq = None
+
+        # 先把「已停止」推给界面，再收拾残局：
+        # 程序卡住时 kill 要花一两秒（Windows 上得先把阻塞的读打断），
+        # 先广播能让界面立刻从「卡住了」里出来。
+        self._publish_stopped_snapshot()
+        self._log("PHASE", "停止执行", {
+            "phase": "stopped", "killed": 1 if dead else 0,
+        })
+
+        # 中断那一下探针会写一份「停在 ntdll」的快照。
+        # 它可能在 kill 返回之后才落盘，所以等文件稳定再同步，
+        # 否则下一条命令会立刻读到这份「已退出」的旧快照。
+        try:
+            self.gdb.sync_settled()
+            self.gdb.drain_events()
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "message": "已停止执行" if dead else "已发出停止指令，但没等到程序退出",
+            "phase": "stopped",
+            "killed": bool(dead),
+        }
+
+    def _restart_command(self) -> Dict[str, Any]:
+        """重启：从头再跑一遍。
+
+        卡死时用户的第一反应就是重启，所以它跟「停止」一样走救命通道：
+        先叫停正在等待的那条命令，再 kill + run，然后立刻回话。
+        新程序停在 main（或第一个断点）时的快照由监视线程收。
+
+        以前它走通用路径，要等满 8 秒的 *stopped 才回话 ——
+        程序一跑起来按钮全灰，用户只能干看着。
+        """
+        if self.gdb is None:
+            return {"ok": False, "message": "调试会话未启动"}
+
+        self._abort_wait.set()
+        try:
+            self._restart()
+        except GdbError as exc:
+            return {"ok": False, "message": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "message": "重启失败: %s" % str(exc)[:160]}
+
+        with self._lock:
+            self._async_wait = True
+        self._broadcast_phase()
+        return {"ok": True, "message": "", "phase": "running"}
+
+    def _stop_previous(self) -> None:
+        """把上一次还在跑的程序停掉（发新 run 之前必须做）。
+
+        刻意放在状态锁外面：这一步最长要一两秒，占着 `_lock` 的话
+        「停止执行」会跟着一起卡。
+        """
+        if self.gdb is None or not self.gdb.target_running:
+            return
+        try:
+            # 这一步几十毫秒（中断 + kill），失败也不影响后面重试
+            self.gdb.kill(timeout=4.0)
+            self.gdb.drain_events()
+            # 等探针把「被杀掉」那份快照写完，再记序号 —— 否则紧接着的
+            # 采集会拿到它，界面上就会「刚点调试就显示程序已退出」。
+            self.gdb.sync_settled()
+        except Exception:
+            pass
+
+    def _finish_guard(self) -> Optional[Dict[str, Any]]:
+        """「跳出函数」的前置检查：跳不出去的时候直接拦下来。
+
+        为什么要有这道检查：`-exec-finish` 的语义是「一直跑到当前函数
+        返回」。停在 scanf 这类系统函数里时，它得等你输入数据才会返回 ——
+        于是这条命令会一直等下去（实测 11 秒才超时），这期间界面就像
+        整个卡死了。而用户真正想要的通常是「回到我自己的代码」，
+        那是「单步执行」的事。
+
+        返回 None 表示可以跳；否则返回一条「不跳」的回话。
+        """
+        with self._lock:
+            snap = self.snapshot
+        if snap is None or snap.state in ("not-started", "exited"):
+            return {
+                "ok": False,
+                "message": "程序现在没有停在任何地方，没法「跳出函数」—— 先按「调试」让它跑起来",
+            }
+        if not snap.frames:
+            return {"ok": False, "message": "拿不到当前调用栈，没法「跳出函数」"}
+
+        frame = snap.frames[0]
+        name = frame.func or "?"
+        if name == "main":
+            return {
+                "ok": False,
+                "message": "已经在 main 函数里了，没有上层函数可以跳出 —— 想跑完请按「继续」",
+            }
+        if not self._is_user_frame(frame.file):
+            return {
+                "ok": False,
+                "message": (
+                    "当前停在 %s 这类系统函数里，「跳出」只会等到它返回"
+                    "（经常就是等输入）—— 先用「单步执行」回到自己的代码，"
+                    "或者先在程序窗口里把数据输进去" % name
+                ),
+            }
+        return None
+
+    def _is_user_frame(self, path: str) -> bool:
+        """判断一个栈帧是不是「用户自己的代码」。
+
+        系统库（ucrt / mingw 的源码）没有「跳出到上层用户代码」这回事，
+        而且它们常常在等 I/O，跳出去就是干等。它们的样子很好认：
+        路径是光秃秃的文件名（GDB 从 DLL 的调试信息里抠出来的），
+        或者落在编译器 / 系统目录里。
+        """
+        if not path:
+            return False
+        # 自己那份源码：GDB 有时报绝对路径，有时只报文件名
+        base = os.path.normcase(os.path.basename(path))
+        if base == os.path.normcase(os.path.basename(self.original_source_path)):
+            return True
+        # 同目录下的多文件工程（另一份 .c/.h）也算用户代码
+        if not os.path.isabs(path):
+            return False
+        try:
+            user_dir = os.path.dirname(os.path.abspath(self.original_source_path))
+            if os.path.normcase(os.path.dirname(os.path.abspath(path))) == os.path.normcase(user_dir):
+                return True
+        except Exception:
+            pass
+        lower = path.replace("\\", "/").lower()
+        for marker in ("/mingw", "/msys", "/ucrt", "/windows/", "/lib/gcc", "/include/"):
+            if marker in lower:
+                return False
+        return True
 
     def _start_debugging(self) -> None:
         """开始调试。
@@ -462,16 +670,8 @@ class DebugSession:
 
         但**上一个程序还在跑**时必须先停掉：否则 `-exec-run` 只会得到
         "The program is already running"，界面看着像点了没反应。
-        以前停止按钮是「发后不理」，很容易留下这种「其实还在跑」的状态。
+        这一步由 `_stop_previous()` 在锁外面做（见 command 里 cmd == "debug"）。
         """
-        if self.gdb.target_running:
-            # 这一步几十毫秒（中断 + kill），失败也不影响后面重试
-            self.gdb.kill(timeout=4.0)
-            self.gdb.drain_events()
-            # 等探针把「被杀掉」那份快照写完，再记序号 —— 否则紧接着的
-            # 采集会拿到它，界面上就会「刚点调试就显示程序已退出」。
-            self.gdb.sync_settled()
-
         if self.gdb.has_user_breakpoint():
             self.gdb.run()
         else:
@@ -574,20 +774,26 @@ class DebugSession:
         if self.gdb is None:
             return {"ok": False, "message": "调试会话未启动"}
 
+        # 先叫停正在等待的那条命令，免得它等满超时才回来
+        self._abort_wait.set()
+
         killed = False
         if self.gdb.target_running or self.state_name in ("running", "stopped"):
             # 和「停止执行」走同一条路：中断 → kill → 等确认死透
-            killed = self.gdb.kill()
-            self.gdb.drain_events()
-            # kill 会让探针再写一份快照，先等它落盘再扔，免得它偷偷跑回来
-            self.gdb.sync_settled()
+            try:
+                killed = self.gdb.kill()
+                self.gdb.drain_events()
+                # kill 会让探针再写一份快照，先等它落盘再扔，免得它偷偷跑回来
+                self.gdb.sync_settled()
+            except Exception:
+                killed = False
 
-        self._async_wait = False
-        self._running = False
-        self._restart_seq = None
-        self._target_pid = None
-        self.state_name = "not-started"
         with self._lock:
+            self._async_wait = False
+            self._running = False
+            self._restart_seq = None
+            self._target_pid = None
+            self.state_name = "not-started"
             self.snapshot = None
         self._log("PHASE", "清空界面", {"killed": 1 if killed else 0})
         # 广播 null：SSE 那一头收到 null 就知道「现在什么都没有」，
@@ -610,20 +816,33 @@ class DebugSession:
 
         只杀 inferior，不杀 GDB —— GDB 活下来，符号表和断点都还在，
         用户可以直接接着按「调试」重来。
+
+        拿不到 PID 时（程序刚开始跑、还没停下来采过一次快照）退回
+        正规的 interrupt → kill：长按的语义是「一定要把它弄死」，
+        不是「必须用 taskkill」。
         """
         if self.gdb is None:
             return {"ok": False, "message": "调试会话未启动"}
+
+        # 这条命令同样要能打断别的等待
+        self._abort_wait.set()
+
         pid = self._target_pid
         if not pid:
-            return {"ok": False, "message": "拿不到程序 PID，无法强制结束"}
+            return self._stop_execution()
 
         killed = _terminate_pid(pid)
         # 进程被外部干掉时 GDB 也会收到退出事件，收一下，别留给下一条命令
-        self.gdb.drain_events()
-        self.gdb.sync_settled()
-        self._running = False
-        self.state_name = "stopped"
-        self._async_wait = False
+        try:
+            self.gdb.drain_events()
+            self.gdb.sync_settled()
+        except Exception:
+            pass
+        with self._lock:
+            self._running = False
+            self.state_name = "stopped"
+            self._async_wait = False
+            self._target_pid = None
         self._publish_stopped_snapshot()
         self._log("PHASE", "强制结束程序", {
             "pid": pid, "killed": 1 if killed else 0,
@@ -673,9 +892,12 @@ class DebugSession:
                     if event is None:
                         continue
                     self._async_wait = False
-                # 程序停了 —— 采集并广播
+                # 程序停了 —— 采集并广播。
+                # abortable=False：监视线程是异步收尾的所有者，
+                # 不能被一条早已过去的「停止」信号误伤（重启之后
+                # 新程序的快照就靠它收）。
                 try:
-                    self._collect_and_broadcast(wait=0.1)
+                    self._collect_and_broadcast(wait=0.1, abortable=False)
                 except Exception:
                     pass
                 if self.state_name == "exited":
@@ -734,17 +956,20 @@ class DebugSession:
             self.gdb.run()
         else:
             self.gdb.start_program()
-        self._target_pid = None
-        self._running = True
-        self.state_name = "running"
-        self._restart_seq = before_seq
+        with self._lock:
+            self._target_pid = None
+            self._running = True
+            self.state_name = "running"
+            # 新程序的快照要「比 kill 旧程序时写的那份」更新 ——
+            # 这份序号交给监视线程判断（它接管之后的采集）。
+            self._restart_seq = before_seq
         self._log("PHASE", "重新开始", {"phase": "running", "breakpoints": len(kept)})
 
     # ------------------------------------------------------------------
     # 采集与广播
     # ------------------------------------------------------------------
 
-    def _collect_and_broadcast(self, wait: float = 8.0) -> bool:
+    def _collect_and_broadcast(self, wait: float = 8.0, abortable: bool = True) -> bool:
         """等探针写出新快照，然后广播。
 
         这个方法会被两个地方调用：命令线程（单步、断点）和后台监视线程
@@ -758,9 +983,51 @@ class DebugSession:
         if self.gdb is None:
             return False
         with self._collect_lock:
-            return self._collect_locked(wait)
+            return self._collect_locked(wait, abortable=abortable)
 
-    def _collect_locked(self, wait: float = 8.0) -> bool:
+    def _wait_stopped(self, timeout: float, abortable: bool = True) -> Optional[Dict[str, Any]]:
+        """等 *stopped，但随时可以被「停止执行」叫停。
+
+        切成 0.2 秒一片地等：这样 `_abort_wait` 一置位就能醒，
+        不用等满整个超时（最长 8 秒）—— 用户点了停止，界面不该还愣在那儿。
+
+        `abortable=False` 给监视线程用：它是「异步收尾」的所有者，
+        不能被一条早已过去的「停止」信号误伤（那会导致重启之后
+        新程序的快照永远等不到）。
+        """
+        if self.gdb is None:
+            return None
+        deadline = time.time() + timeout
+        while True:
+            if abortable and self._abort_wait.is_set():
+                return None
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            event = self.gdb.wait_event("*stopped", timeout=min(0.2, remaining))
+            if event is not None:
+                return event
+
+    def _wait_new_snapshot(
+        self, since: int, timeout: float, abortable: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """等一份比 `since` 更新的快照（命令线程的等待可被打断）。"""
+        if self.gdb is None:
+            return None
+        deadline = time.time() + timeout
+        while True:
+            if abortable and self._abort_wait.is_set():
+                return None
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            data = self.gdb.wait_new_snapshot(
+                since_seq=since, timeout=min(0.2, remaining)
+            )
+            if data is not None:
+                return data
+
+    def _collect_locked(self, wait: float = 8.0, abortable: bool = True) -> bool:
         """真正干活的版本。调用方必须持有 _collect_lock。"""
         if self.gdb is None:
             return False
@@ -775,11 +1042,18 @@ class DebugSession:
             # 不要再等 *stopped 事件 —— kill 旧程序时可能已经消耗掉它，
             # 而新程序的停止事件要等程序真的跑起来才来，
             # 那会白等满 8 秒。
-            raw = self.gdb.wait_new_snapshot(since_seq=since, timeout=6.0)
+            raw = self._wait_new_snapshot(since, timeout=6.0, abortable=abortable)
+            if raw is None and abortable and self._abort_wait.is_set():
+                return False
             event = None
         else:
-            event = self.gdb.wait_event("*stopped", timeout=wait)
-            raw = self.gdb.read_snapshot(timeout=3.0)
+            event = self._wait_stopped(wait, abortable=abortable)
+            if event is None and abortable and self._abort_wait.is_set():
+                # 被「停止执行」/「重启」打断了 —— 这条命令不再采集、不再广播，
+                # 收尾交给打断它的那条路（它会发布一份「已停止」的快照）。
+                return False
+            # 没等到事件时别在这儿多等 3 秒：程序还在跑，探针也不会写新快照。
+            raw = self.gdb.read_snapshot(timeout=3.0 if event is not None else 1.0)
 
         # 兜底：事件说「停住了」，快照却说「程序已退出」——
         # 那读到的一定是「上一条程序被杀掉」时写的旧文件。
@@ -789,7 +1063,9 @@ class DebugSession:
             if reason in ("breakpoint-hit", "end-stepping-range",
                           "function-finished", "location-reached",
                           "watchpoint-trigger") and raw.get("state") == "exited":
-                fresh = self.gdb.wait_new_snapshot(raw.get("seq", 0), timeout=2.0)
+                fresh = self._wait_new_snapshot(
+                    raw.get("seq", 0), timeout=2.0, abortable=abortable
+                )
                 if fresh is not None:
                     raw = fresh
 

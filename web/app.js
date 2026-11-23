@@ -78,13 +78,24 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  /* 这几条命令不能被「上一条命令还在跑」挡住。
+
+     程序卡在 scanf 里时，界面正在等一条永远等不到的命令（比如在系统函数里
+     点了「跳出函数」），这时停止 / 重启是唯一的出路 —— 必须立刻发出去，
+     否则用户看到的就是「什么都点不动，只能关掉重来」。 */
+  const URGENT_CMDS = { "stop": 1, "force-kill": 1, "restart": 1 };
+
   async function sendCommand(cmd, extra) {
+    const urgent = !!URGENT_CMDS[cmd];
     // 上一条命令还没回来就丢掉这条 —— 但界面可能已经先改了样子
     // （断点点下去就立刻变色），所以要拉一次真实状态把手抖修正回来，
     // 否则界面和 GDB 会各说各话。
-    if (state.busy) { setTimeout(fetchState, 60); return; }
-    state.busy = true;
-    setControlsDisabled(true);
+    // 救命命令例外：不排队、不锁按钮。
+    if (state.busy && !urgent) { setTimeout(fetchState, 60); return; }
+    if (!urgent) {
+      state.busy = true;
+      setControlsDisabled(true);
+    }
     updateBusyHint();
     try {
       const resp = await fetch("/api/command", {
@@ -115,12 +126,15 @@
       // 命令等超时了也没等到程序停下来 —— 大概卡在等输入。
       // 反过来，命令正常返回（含 stop / restart）就说明不用再提示了。
       state.waiting = !!data.waiting;
+      if (data.ok && data.message) setBadge(data.message, "info");
     } catch (e) {
       console.error("command failed", e);
       setBadge("命令发送失败", "warn");
     } finally {
-      state.busy = false;
-      setControlsDisabled(false);
+      if (!urgent) {
+        state.busy = false;
+        setControlsDisabled(false);
+      }
       updateBusyHint();
       // 后端 SSE 会推送新状态；这里再兜底拉一次
       setTimeout(fetchState, 250);
@@ -195,30 +209,61 @@
     updateChrome();
   }
 
-  /* 「指令运行中，请检查程序是否在等待输入」——
-     程序卡在 scanf 上时，前端只能干等到超时，按钮一直是灰的。
-     这行字就是解释：不是坏了，是它在等你在控制台敲点东西。
+  /* 「程序运行中」提示条 —— 顺便兼职「是不是卡住了」。
 
-     普通命令几十毫秒就回来，所以延迟 600ms 再显示，避免每次点按钮闪一下。 */
-  let busyHintTimer = null;
+     一条命令超过 3 秒还没回来，或者程序跑起来 3 秒没有任何新快照，
+     基本就是卡住了（scanf 等输入、死循环、系统函数里退不出来）。
+     这时候把文案换成「长按停止执行强制终止」，并染成告警色 ——
+     因为停止按钮这个时候是唯一能救命的东西，必须让人看见。
+
+     普通命令几十毫秒就回来，所以延迟 400ms 再显示，避免每次点按钮闪一下。 */
+  const HINT_SHOW_MS = 400;
+  const HINT_STUCK_MS = 3000;
+  let hintTimer = null;      // 「该不该露脸」的延迟
+  let stuckTimer = null;     // 3 秒没动静 → 换文案
+  let busySince = 0;
+
+  function busyCondition() {
+    return state.phase === "running" || state.busy || state.waiting;
+  }
 
   function updateBusyHint() {
     const hint = document.getElementById("busy-hint");
     if (!hint) return;
-    const shouldShow = state.phase === "running" || state.busy || state.waiting;
 
-    if (shouldShow) {
-      if (hint.hidden && !busyHintTimer) {
-        busyHintTimer = setTimeout(() => {
-          busyHintTimer = null;
-          hint.hidden = false;
-        }, 600);
-      }
+    if (!busyCondition()) {
+      busySince = 0;
+      if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
+      if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
+      hint.hidden = true;
+      hint.classList.remove("stuck");
       return;
     }
-    clearTimeout(busyHintTimer);
-    busyHintTimer = null;
-    hint.hidden = true;
+
+    const now = performance.now();
+    if (!busySince) busySince = now;
+    const elapsed = now - busySince;
+
+    if (elapsed >= HINT_SHOW_MS) {
+      const stuck = elapsed >= HINT_STUCK_MS;
+      hint.hidden = false;
+      hint.textContent = stuck
+        ? "卡住了？长按「停止执行」1 秒强制终止程序"
+        : "程序运行中…";
+      hint.classList.toggle("stuck", stuck);
+    } else if (!hintTimer) {
+      hintTimer = setTimeout(() => {
+        hintTimer = null;
+        updateBusyHint();
+      }, HINT_SHOW_MS - elapsed);
+    }
+
+    if (elapsed < HINT_STUCK_MS && !stuckTimer) {
+      stuckTimer = setTimeout(() => {
+        stuckTimer = null;
+        updateBusyHint();
+      }, HINT_STUCK_MS - elapsed);
+    }
   }
 
   function updateChrome() {
@@ -235,21 +280,27 @@
       loc.textContent = "—";
     }
 
-    if (snap && snap.state === "exited") {
-      badge.textContent = "程序已退出";
-      badge.className = "badge exited";
-    } else if (snap && snap.state === "not-started") {
-      badge.textContent = "未执行";
-      badge.className = "badge idle";
-    } else if (state.phase === "running") {
-      badge.textContent = "运行中";
-      badge.className = "badge running";
-    } else if (state.busy) {
-      badge.textContent = "执行中…";
-      badge.className = "badge running";
-    } else {
-      badge.textContent = "就绪";
-      badge.className = "badge";
+    // 临时提示有「保质期」：没过期就先让它占着，别被常规刷新盖掉。
+    // 否则 SSE 推一份快照过来，「已经在 main 里了…」只闪两百毫秒就没了。
+    if (!badgeHold || performance.now() >= badgeHold.until) {
+      badgeHold = null;
+      badge.title = "";
+      if (snap && snap.state === "exited") {
+        badge.textContent = "程序已退出";
+        badge.className = "badge exited";
+      } else if (snap && snap.state === "not-started") {
+        badge.textContent = "未执行";
+        badge.className = "badge idle";
+      } else if (state.phase === "running") {
+        badge.textContent = "运行中";
+        badge.className = "badge running";
+      } else if (state.busy) {
+        badge.textContent = "执行中…";
+        badge.className = "badge running";
+      } else {
+        badge.textContent = "就绪";
+        badge.className = "badge";
+      }
     }
 
     document.getElementById("prog-name").textContent = state.program
@@ -266,6 +317,10 @@
      - 未执行：只能「调试」和「重启」，别的执行控制都还没意义
      - 运行中：可以「停止执行」
      - 已停下：可以单步 / 继续 / 跳出 / 运行到光标
+
+     唯一的例外是「停止执行」和「重启」：**永远可点**。
+     程序卡在 scanf 里、GDB 卡在某个系统调用里，这两颗按钮是唯一的出路；
+     一旦跟着别的按钮一起变灰，用户就只能去任务管理器收尸了。
   */
   function updateButtonStates() {
     const snap = state.snapshot;
@@ -287,23 +342,41 @@
     set("btn-finish", !state.busy && hasSnapshot && !running && !exited);
     set("btn-goto", !state.busy && hasSnapshot && !running && !exited);
     set("btn-continue", !state.busy && hasSnapshot && !running && !exited);
-    set("btn-stop", !state.busy && (running || hasSnapshot) && !exited);
-    set("btn-restart", !state.busy && !notStarted);
+    // 这两颗永不禁用 —— 见上面的说明
+    set("btn-stop", true);
+    set("btn-restart", true);
     // 有画可清才亮：跑过、停在断点、已退出都算；刚打开或刚清空时是灰的
     set("btn-clear", !state.busy && (hasSnapshot || !notStarted));
   }
 
-  function setBadge(text, kind) {
+  /* 顶栏徽章上的临时提示（「已在第 31 行设置断点」「已经在 main 函数里了…」）。
+
+     两个讲究：
+     1. 有保质期（默认 2 秒）。updateChrome 随时会被 SSE 的快照刷新调用，
+        不占位的话提示只活到下一帧 —— 用户根本来不及看完一句话。
+     2. 同一句话正在显示时不再重设。用户连点几下「跳出函数」，计时不会一直
+        被重置，文案也不会闪一下再回来。 */
+  const BADGE_HOLD_MS = 2000;
+  let badgeHold = null;
+
+  function setBadge(text, kind, holdMs) {
     const badge = document.getElementById("status-badge");
+    if (!text) return;
+    const ms = holdMs || BADGE_HOLD_MS;
+    const now = performance.now();
+    if (badgeHold && badgeHold.text === text && now < badgeHold.until) return;
     badge.textContent = text;
     badge.className = "badge" + (kind === "warn" ? " running" : "");
-    setTimeout(updateChrome, 2200);
+    badge.title = text;              // 太长被省略号截了，悬停看全句
+    badgeHold = { text: text, until: now + ms };
+    setTimeout(updateChrome, ms + 30);
   }
 
   function setControlsDisabled(disabled) {
-    // 真正的可用性判断交给 updateButtonStates，这里只管「命令进行中」
+    // 真正的可用性判断交给 updateButtonStates，这里只管「命令进行中」。
+    // 停止 / 重启刻意不在名单里：它们任何时候都得能点。
     ["btn-debug", "btn-next", "btn-step", "btn-finish", "btn-goto",
-     "btn-continue", "btn-stop", "btn-restart", "btn-clear"].forEach((id) => {
+     "btn-continue", "btn-clear"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.disabled = disabled;
     });
@@ -320,18 +393,20 @@
      --------------------------------------------------------- */
 
   /* 正常停止走「中断 → GDB kill」，实测 0.2~0.4 秒就能确认死透，
-     日常根本用不着别的。长按 3 秒这条是**兜底**：万一 GDB 自己卡住
+     日常根本用不着别的。长按 1 秒这条是**兜底**：万一 GDB 自己卡住
      （程序陷在某个系统调用里、`console kill` 回 error），
      只有从外面强制结束进程（Windows 用 taskkill /F，Linux 用 SIGKILL），
      GDB 才会跟着醒过来。
 
-     交互上刻意不做「长按才有反应」：按下就开始计时，手指抬起时
-     不满 3 秒就按普通「停止执行」处理 —— 和以前的点击手感完全一致，
-     只是按住不放会多出一条进度条。 */
+     所以「短按」和「长按」都是停止，只差一刀砍在哪儿：
+     手指抬起时不满 1 秒走普通 stop，按满 1 秒直接 force-kill。
+
+     交互上刻意不做「长按才有反应」：按下就开始计时并画进度条，
+     短按的手感和以前点击完全一致。 */
   function bindHoldStop() {
     const btn = document.getElementById("btn-stop");
     if (!btn) return;
-    const HOLD_MS = 3000;
+    const HOLD_MS = 1000;
     const fill = btn.querySelector(".hold-fill");
     let raf = 0;
     let startedAt = 0;
@@ -405,7 +480,7 @@
       sendCommand("goto", { line: currentCursorLine() });
     });
     document.getElementById("btn-continue").addEventListener("click", () => sendCommand("continue"));
-    bindHoldStop();          // 停止执行：短按=停止，长按 3 秒=强制结束
+    bindHoldStop();          // 停止执行：短按=停止，长按 1 秒=强制结束
     document.getElementById("btn-restart").addEventListener("click", () => sendCommand("restart"));
     document.getElementById("btn-clear").addEventListener("click", () => sendCommand("clear"));
 
@@ -473,6 +548,66 @@
   }
 
   /* ---------------------------------------------------------
+     底部那行小字（彩蛋）
+     --------------------------------------------------------- */
+
+  /* 一行「正在…」的废话，纯装饰，跟调试状态没有任何关系。
+
+     几个约束：
+     - 词库从后端拿一次（/api/quips），点按钮时在本地随机 —— 不为一行字发请求；
+     - 每次随机都换掉上一条，否则连点两下没变化，看着像坏了；
+     - 「隐藏」只管这一次：不写 localStorage，重新打开页面它还会回来。 */
+  let quips = [];
+  let quipCurrent = "";
+
+  async function loadQuips() {
+    try {
+      const resp = await fetch("/api/quips");
+      const data = await resp.json();
+      if (!data || !data.ok || !data.lines || !data.lines.length) return;
+      quips = data.lines;
+      const bar = document.getElementById("quip-bar");
+      if (bar) bar.hidden = false;
+      nextQuip();
+    } catch (e) {
+      // 拿不到就算了，底下空着也不影响调试
+    }
+  }
+
+  function nextQuip() {
+    const text = document.getElementById("quip-text");
+    if (!text || !quips.length) return;
+    if (quips.length === 1) {
+      text.textContent = quips[0];
+      return;
+    }
+    let i = Math.floor(Math.random() * quips.length);
+    // 撞上了就顺移一位 —— 比重新摇省事，而且保证一定换掉
+    if (quips[i] === quipCurrent) i = (i + 1) % quips.length;
+    quipCurrent = quips[i];
+    text.textContent = quipCurrent;
+  }
+
+  function bindQuips() {
+    // 点任何按钮都换一条。挂在捕获阶段：按钮自己的处理函数
+    // 就算 stopPropagation 也挡不住这里。
+    document.addEventListener("click", (ev) => {
+      const el = ev.target;
+      if (el && el.closest && el.closest("button")) nextQuip();
+    }, true);
+
+    const hide = document.getElementById("btn-quip-hide");
+    if (hide) {
+      hide.addEventListener("click", () => {
+        const bar = document.getElementById("quip-bar");
+        if (bar) bar.hidden = true;
+      });
+    }
+
+    loadQuips();
+  }
+
+  /* ---------------------------------------------------------
      被调试程序的终端（Linux PTY）
      --------------------------------------------------------- */
 
@@ -480,9 +615,21 @@
   let consoleTimer = 0;
 
   function setConsoleHint(mode) {
+    const panel = document.getElementById("console-panel");
     const hint = document.getElementById("console-hint");
     const input = document.getElementById("console-input");
     const form = document.getElementById("console-form");
+
+    // 这块面板只有 Linux 的 PTY 用得上 —— 那是被调试程序唯一的 stdin/stdout，
+    // 在下面这行输入框里敲字，程序才吃得到。
+    // Windows 上程序跑在自己的控制台窗口里，这里只剩一句「程序在独立控制台
+    // 窗口中运行」加一片空白，白占半屏高度，所以收起来。
+    //
+    // 判定用后端报的 mode 而不是 UA：WSL 里 cdbg 跑在 Linux（pty），
+    // 浏览器却是 Windows 的，按 UA 藏了就没地方输入了。
+    // HTML 里默认就是 hidden —— 这里只负责「该出现的时候让它出现」。
+    if (panel) panel.hidden = mode !== "pty";
+
     if (!hint) return;
     const writable = mode === "pty";
     if (input) input.disabled = !writable;
@@ -591,6 +738,7 @@
 
     bind();
     bindConsole();
+    bindQuips();
 
     // 回看历史快照：只影响显示，不改变调试状态
     Timeline.setOnView((snap) => {

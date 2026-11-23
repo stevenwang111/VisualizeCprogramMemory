@@ -133,6 +133,7 @@ cdbg/
 | `curriculum.py` | 教学提示文案的唯一来源 | 改提示文案来这里，别散落到前端 |
 | `web_server.py` | 静态托管 + REST + SSE + 操作日志接口 | 标准库 `ThreadingHTTPServer`，别加第三方框架 |
 | `oplogger.py` | 操作日志落盘 | 观测者，任何异常都必须静默 |
+| `quips.py` | 启动 / 底部小字的词库（来自上游 MIT 词库包，已删改） | 纯装饰，不许参与任何业务判断；`fill()` 负责替换 `{file_name}` 这类占位符；`/api/quips` 一次给全量，前端本地随机 |
 | `browser.py` | 开浏览器 | — |
 
 ### 前端 `web/`（纯静态，无构建步骤）
@@ -235,7 +236,17 @@ cdbg/
 - **清空界面时 `render(source, null)` 会保留上一行的 `currentLine`**：这是刻意的（重画源码时不希望高亮乱跳），所以清空要先调 `SourceView.clearPosition()` 把蓝行/绿行显式抹掉。
 - **长按强制结束只杀 inferior，不杀 gdb**：Windows 用 `taskkill /PID <pid> /F`，Linux 用 `SIGKILL` 干掉被调试程序，GDB 收到退出事件后自己醒过来，符号表和断点都还在，接着按「调试」能直接重来。PID 从快照里抄（`session._target_pid`），**每次起新 inferior 都要清空**：Windows 会复用 PID，拿旧 PID 开枪可能打到无关进程。
 - **`taskkill` 的输出不要 `text=True` 收**：中文系统上是 GBK，换区域设置就会解码报错；只关心退出码，stdout/stderr 一律 `DEVNULL`，并带 `CREATE_NO_WINDOW` 免得闪黑框。
-- **「停止执行」的点击不能挂在 `click` 上**：长按 3 秒后松手，`click` 也会跟着触发，等于强杀完又发一条 stop。改成 `pointerdown` 起计时、`pointerup` 收尾（挂在 `window` 上，手指拖出按钮再松手也要收尾，否则进度条会一直挂着），不满 3 秒才走普通 `stop`。
+- **「停止执行」的点击不能挂在 `click` 上**：长按 1 秒后松手，`click` 也会跟着触发，等于强杀完又发一条 stop。改成 `pointerdown` 起计时、`pointerup` 收尾（挂在 `window` 上，手指拖出按钮再松手也要收尾，否则进度条会一直挂着），不满 1 秒才走普通 `stop`。
+- **「停止 / 重启」永远不灰，也不排队**：程序卡在 `scanf`、或某条命令一直等不到结果时，它们是唯一的出路。前端 `updateButtonStates` 对这两颗无条件 `enabled`、`setControlsDisabled` 的名单里也没有它们，`sendCommand` 用 `URGENT_CMDS` 绕过 `state.busy` 队列；后端 `command()` 里 stop / restart / force-kill / clear 在 `_exec_lock` **之前**就返回，并且先 `_abort_wait.set()` 把正在等待的命令叫停。
+- **等程序停下的那几秒不能抱着 `_lock`**：以前 `command()` 整个方法（含 8 秒等待）都在 `with self._lock` 里，于是在 `scanf` 上按「跳出函数」时，停止按钮、重启按钮、连 `/api/state` 全被堵住（日志里那次 11 秒的 finish 就是这么来的）。现在 `_lock` 只护状态字段、`_exec_lock` 只串行化执行类命令，等待发生在两把锁外面。
+- **`_abort_wait` 是「一次性的叫停信号」**：`_wait_stopped` / `_wait_new_snapshot` 按 0.2 秒一片轮询它，所以停止能在一个 tick 内生效。但**监视线程的采集必须 `abortable=False`** —— 它是一次已经过去的中止信号，误伤它就会让「重启之后新程序的快照永远等不到」（表现为重启完界面一直显示「运行中」、行号停在旧位置）。
+- **跳出函数要先看当前栈帧**：`-exec-finish` 的语义是「跑到当前函数返回」，停在 `scanf` 这类系统函数里时它得等你输入才返回，一条命令能耗掉 11 秒。`session._finish_guard()` 在发给 GDB **之前**判断：当前帧不是用户代码（`_is_user_frame`：GDB 常把库源码报成光秃秃的 `ucrt_scanf.c`，或落在 mingw/ucrt/include 目录下）、或者已经停在 `main`，就直接回一句话，命令不发出去。
+- **徽章上的临时提示要「占位」**：`setBadge()` 只负责写文字，而 `updateChrome()` 随时会被 SSE 快照刷新调用 —— 不占位的话，提示只活到下一帧（实测 200ms 就被「就绪」盖掉）。现在 `setBadge` 记一个 `badgeHold = {text, until}`（默认 2 秒），`updateChrome` 在到期前不碰徽章；同一句话正在显示时直接 return，连点几下也不会把计时重置成「永远显示」。
+- **底部小字：词库写死在 Python 里**（`cdbg/quips.py`）。打包成单文件 exe 之后没有「源码目录」，为几行字再加一条资源定位和编码处理不值得；前端通过 `/api/quips` 一次拿全量，本地随机，不为换条字发请求。点击监听挂在 `document` 的**捕获阶段**，按钮自己的 handler 就算 `stopPropagation` 也挡不住换词。「隐藏」只改 DOM，不写 `localStorage` —— 它是「这一次」的事，刷新就该回来。
+- **文案里的占位符要填掉**：上游词库带 `{file_name}` / `{provider}`，不替换的话界面上会明晃晃显示花括号，看着像我们自己的 bug（`quips.fill()`）。
+- **「程序输出」面板只能藏，不能删**：`bindConsole()` / `pollConsole()` / `setConsoleHint()` 和输入表单的 submit 都盯着 `console-panel` / `console-output` / `console-hint` / `console-input` / `console-form` 这几个 id；`pollConsole()` 拿不到 `console-output` 会**直接 return**（静默失效），Linux 上就再也没法给 `scanf` 喂输入了。现在是「HTML 里默认 `hidden`，`setConsoleHint(mode)` 里 `mode === "pty"` 才亮出来」。
+- **`.panel` 自带 `display: flex`，会盖掉 `[hidden]` 的 `display: none`**（作者样式优先于 UA 样式）。所以 `theme.css` 里必须有一条 `.panel-console[hidden] { display: none; }`，否则「藏起来」的面板照样占着整行高度。
+- **面板显隐看后端 `mode`，别看 UA**：Windows 上是 `own`/`shared`（程序有自己的控制台窗口），Linux 是 `pty`。WSL 里 cdbg 跑在 Linux、浏览器却在 Windows，按 `navigator.userAgent` 藏了就把人家唯一的输入口藏没了。
 
 ---
 

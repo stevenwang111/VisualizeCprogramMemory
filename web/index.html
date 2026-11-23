@@ -21,13 +21,13 @@
     <button id="btn-finish" class="btn" title="跳出当前函数 (Ctrl+F8)">↑ 跳出函数</button>
     <button id="btn-goto" class="btn" title="运行到光标所在行 (Ctrl+F5)">⇥ 运行到光标</button>
     <button id="btn-continue" class="btn" title="继续运行到下一个断点 (F4)">⏵ 继续</button>
-    <button id="btn-stop" class="btn danger holdable" title="停止执行 (F6)｜长按 3 秒 = 强制结束进程">■ 停止执行<span class="hold-fill"></span></button>
+    <button id="btn-stop" class="btn danger holdable" title="停止执行 (F6)｜长按 1 秒 = 强制结束进程">■ 停止执行<span class="hold-fill"></span></button>
     <button id="btn-restart" class="btn" title="从头重新运行">⟳ 重启</button>
     <button id="btn-clear" class="btn ghost" title="清空界面：把这次调试看到的东西全清掉（源码和断点保留，程序会先停掉）">⌫ 清空界面</button>
   </div>
 
-  <!-- 程序卡在 scanf 之类的阻塞调用上时，告诉用户该去控制台看一眼 -->
-  <span id="busy-hint" class="busy-hint" hidden>指令运行中，请检查程序是否在等待输入；Linux 可在下方「程序输出」面板输入</span>
+  <!-- 程序跑起来之后显示；卡住超过 3 秒会换成「长按停止执行强制终止」 -->
+  <span id="busy-hint" class="busy-hint" hidden>程序运行中…</span>
 
   <div class="status">
     <span id="status-loc" class="loc">—</span>
@@ -111,8 +111,12 @@
     <div class="lesson-list" id="lesson-list"></div>
   </section>
 
-  <!-- ============ 被调试程序的终端（Linux PTY / Windows 独立控制台） ============ -->
-  <section class="panel panel-console" id="console-panel">
+  <!-- ============ 被调试程序的终端 ============
+       一开始是 hidden。只有 Linux 的 PTY 模式才用得上（程序唯一的 stdin/stdout）；
+       Windows 上程序跑在自己的控制台窗口里，这块面板只会显示一句
+       「程序在独立控制台窗口中运行」加一片空白，白占半屏高度 —— app.js 里
+       拿到 mode 不是 pty 就让它一直藏着，高度还给源码和内存视图。 -->
+  <section class="panel panel-console" id="console-panel" hidden>
     <div class="panel-head">
       <h2>程序输出</h2>
       <span class="hint" id="console-hint">—</span>
@@ -130,6 +134,15 @@
   </section>
 
 </main>
+
+<!-- ============ 底部小字（彩蛋）============
+     刚打开是 hidden：等 /api/quips 拿到词库再显示，免得先闪一条空带子。
+     顺序是「[隐藏] + 那句话」，整条贴着窗口左边框，像页脚而不是工具栏。
+     点任意按钮换一条；「隐藏」只关本次（刷新就回来）。 -->
+<div class="quip-bar" id="quip-bar" hidden>
+  <button class="quip-hide" id="btn-quip-hide" title="关掉这一行（重新打开页面才会再出现）">隐藏</button>
+  <span class="quip-text" id="quip-text"></span>
+</div>
 
 <!-- ============ 变量 diff 对比面板 ============ -->
 <div class="diff-panel" id="diff-panel" hidden>
