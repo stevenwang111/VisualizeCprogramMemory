@@ -193,6 +193,8 @@ def main(argv=None):
         for d in session.build_errors[:6]:
             print("     第 %d 行: %s" % (d.get("line", 0), d.get("message", "")))
     else:
+    
+        print("编译成功！\n本次编译中意外发现三位参与编译的人员，他们分别是亚切斯拉夫·巴兰尼科夫、安东·尤丁采夫、尼基塔·布亚诺夫......")
         print("  源码:   %s" % session.original_source_path)
         if session.build and session.build.exe_path:
             print("  可执行: %s" % session.build.exe_path)
@@ -203,6 +205,7 @@ def main(argv=None):
         except ToolNotFound:
             pass
         print("  状态:   未执行（按「调试」开始，或点源码左侧行号设置断点）")
+
 
     if args.headless:
         print_headless(session.snapshot)
