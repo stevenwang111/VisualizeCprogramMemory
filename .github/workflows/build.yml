@@ -109,23 +109,31 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: 发布 alpha 测试版到 Release
+      - name: 为每个新版本创建 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: alpha
           ASSET: build_out/cdbg-windows-x64.zip
           SHA: ${{ needs.check.outputs.head_sha }}
         shell: bash
         run: |
-          TITLE="cdbg alpha (测试版) · ${SHA:0:7}"
+          SHORT_SHA="${SHA:0:7}"
+          TAG="alpha-$SHORT_SHA"
+          TITLE="cdbg alpha · $SHORT_SHA"
+          # 新 Release 由 GitHub 基于 tag 自动生成源码包，tag 指向本 commit，
+          # 因此 zip 与源码包严格对应同一份代码。
+          NOTES="自动构建自 commit $SHA。运行时包与下方源码包来自同一 commit。"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # 已有 alpha release：只覆盖资产和标题，不动 changelog（留给用户以后自己填）
+            # 同一 commit 被手动重复构建：只刷新 zip，不新建 Release，
+            # 也不覆盖用户自己填写的 release 说明。
             gh release upload "$TAG" "$ASSET" --clobber
-            gh release edit "$TAG" --title "$TITLE" --prerelease
-            echo "已更新 alpha release 的资产 (${SHA:0:7})"
+            echo "已刷新 $TAG 的运行时包（保留原有说明）"
           else
-            gh release create "$TAG" "$ASSET" --title "$TITLE" --notes "" --prerelease
-            echo "已创建 alpha release (${SHA:0:7})"
+            gh release create "$TAG" "$ASSET" \
+              --target "$SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --prerelease
+            echo "已创建新 Release $TAG"
           fi
 
       - name: 记录本次构建到的 commit
