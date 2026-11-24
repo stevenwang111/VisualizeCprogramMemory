@@ -331,13 +331,17 @@ node ui_forcekill_test.js http://127.0.0.1:8779/ # 程序卡在 scanf 时长按�
 
 | 方式 | 何时跑 |
 |---|---|
-| 手动 `workflow_dispatch` | 随时，去 Actions 页选 "Build cdbg (Windows standalone zip)" → Run workflow |
+| 手动 `workflow_dispatch` | 随时，去 Actions 页选 "Build cdbg (Windows standalone zip)" → Run workflow；可填 `version` 指定版本号（如 `1.1.1`），留空则自动递增 |
 | 定时 `schedule` | 每天 UTC 17:00 = 北京时间次日凌晨 01:00 |
 | 空跑保护 | 定时触发时对比 `last-built` tag 和当前 HEAD，没有新提交就跳过 |
 
-**流程：** `check`（判断要不要构建）→ `build`（Windows runner + Python 3.14 + Nuitka + MSVC）→ 上传 artifact → 为每个新 commit 新建一个 `alpha-<commit 前 7 位>` 预发布 release → 打 `last-built` tag 记账。
+**流程：** `check`（判断要不要构建、分配版本号）→ `build`（Windows runner + Python 3.14 + Nuitka + MSVC）→ 上传 artifact → 创建正式版 Release → 打 `last-built` tag 记账。
 
-每个 Release 的 tag 指向构建时的 commit，所以 zip 与 GitHub 自动生成的源码包出自同一份代码。不再反复覆盖固定的 `alpha` release（那样会出现 zip 是新的、源码包却是旧 tag 的情况）。同一个 commit 被手动重复构建时只刷新 zip，不新建 Release，也不覆盖 release 说明。
+**版本号：** 形如 `v1.1.1`，每次构建取远程最大的 `v1.1.x` 加 1（首个为 `1.1.1`）；手动触发可指定覆盖。Release 标题为 `Ver<版本号>`，是**正式版**（不带 pre-release 标签），所以会出现在仓库首页并被标为 Latest。旧的 `alpha` 预发布版保留作历史，不影响 Latest。
+
+**说明文档（Release notes）：** 自动列出自上次构建（`last-built`）到本次提交之间的每个 commit 说明、commit 号、日期和改动文件列表，作为版本说明。
+
+每个 Release 的 tag 指向构建时的 commit，所以 zip 与 GitHub 自动生成的源码包出自同一份代码。同一个版本号被重复构建时只刷新 zip 并更新标题/说明，不重复建 Release。
 
 Windows runner 不是随便选的：Nuitka 生成 Windows PE exe 必须调用 MSVC 链接器，`windows-latest` 自带 MSVC 和 Windows SDK，Linux runner 做不到。
 

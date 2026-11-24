@@ -1,8 +1,14 @@
 name: Build cdbg (Windows standalone zip)
 
 on:
-  # 本次手动触发
+  # 手动触发：可指定版本号，留空则自动递增 v1.1.x
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 1.1.1）；留空则按 v1.1.x 自动 +1'
+        required: false
+        type: string
+        default: ''
   # Pull Request：只跑 Linux 测试，不打包
   pull_request:
   # 之后：每天北京时间凌晨 01:00（UTC 17:00）
@@ -24,6 +30,8 @@ jobs:
     outputs:
       should_build: ${{ steps.decide.outputs.should_build }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
+      prev_sha: ${{ steps.decide.outputs.prev_sha }}
+      version: ${{ steps.decide.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,19 +41,40 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           HEAD_SHA="${{ github.sha }}"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+          # 读取上次成功构建时打的 tag，作为 changelog 起点
+          LAST_SHA=$(git ls-remote --tags origin refs/tags/last-built 2>/dev/null | awk '{print $1}' | head -1)
+          echo "prev_sha=$LAST_SHA" >> "$GITHUB_OUTPUT"
+          echo "上次构建 SHA: ${LAST_SHA:-（无）}"
+          echo "当前 HEAD  SHA: $HEAD_SHA"
+
+          # 版本号：手动指定优先；否则取远程最大的 v1.1.x + 1，一个都没有就从 1.1.1 开始
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+            echo "使用手动指定的版本号: $VERSION"
+          else
+            LATEST_PATCH=$(git ls-remote --tags origin 'refs/tags/v1.1.*' 2>/dev/null \
+              | awk '{print $2}' | sed 's#refs/tags/v1\.1\.##; s#\^{}##' \
+              | grep -E '^[0-9]+$' | sort -n | tail -1)
+            if [ -z "$LATEST_PATCH" ]; then
+              VERSION="1.1.1"
+            else
+              VERSION="1.1.$((LATEST_PATCH + 1))"
+            fi
+            echo "自动分配版本号: $VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           if [ "$EVENT" = "workflow_dispatch" ]; then
             echo "手动触发，直接构建"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # 读取上次成功构建时打的 tag
-          LAST_SHA=$(git ls-remote --tags origin refs/tags/last-built 2>/dev/null | awk '{print $1}' | head -1)
-          echo "上次构建 SHA: ${LAST_SHA:-（无）}"
-          echo "当前 HEAD  SHA: $HEAD_SHA"
           if [ "$LAST_SHA" = "$HEAD_SHA" ]; then
             echo "没有新的提交，跳过本次定时构建"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
@@ -89,6 +118,8 @@ jobs:
       PYTHONIOENCODING: utf-8   # runner 默认 cp1252，中文日志会抛 UnicodeEncodeError
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 生成 changelog 需要完整历史
 
       - name: 设置 Python 3.14
         uses: actions/setup-python@v5
@@ -109,31 +140,53 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: 为每个新版本创建 Release
+      - name: 创建正式版 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ASSET: build_out/cdbg-windows-x64.zip
           SHA: ${{ needs.check.outputs.head_sha }}
+          PREV_SHA: ${{ needs.check.outputs.prev_sha }}
+          VERSION: ${{ needs.check.outputs.version }}
         shell: bash
         run: |
-          SHORT_SHA="${SHA:0:7}"
-          TAG="alpha-$SHORT_SHA"
-          TITLE="cdbg alpha · $SHORT_SHA"
-          # 新 Release 由 GitHub 基于 tag 自动生成源码包，tag 指向本 commit，
-          # 因此 zip 与源码包严格对应同一份代码。
-          NOTES="自动构建自 commit $SHA。运行时包与下方源码包来自同一 commit。"
+          TAG="v$VERSION"
+          TITLE="Ver$VERSION"
+
+          # 变更说明：列出自上次构建以来的每个 commit 说明，
+          # 附该 commit 改动的文件；首次构建无上次记录时列出当前 commit。
+          if [ -n "$PREV_SHA" ] && git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+            RANGE="${PREV_SHA}..${SHA}"
+            COMMITS=$(git rev-list --reverse "$RANGE")
+          else
+            # 首次构建：只列当前 commit
+            COMMITS=$(git rev-list --reverse -1 "$SHA")
+          fi
+          NOTES_FILE="release_notes.md"
+          {
+            echo "自上次发布以来的变更："
+            echo
+            while IFS= read -r commit; do
+              echo "### $(git log -1 --format='%s' "$commit")"
+              echo
+              echo "commit \`${commit:0:7}\` · $(git log -1 --format='%ad' --date=short "$commit")"
+              echo
+              git diff-tree --no-commit-id --name-only -r "$commit" | sed 's/^/- /'
+              echo
+            done <<< "$COMMITS"
+          } > "$NOTES_FILE"
+
+          # tag 指向本 commit，zip 与自动生成的源码包对应同一份代码；
+          # 不带 --prerelease，GitHub 会把它标记为 Latest。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # 同一 commit 被手动重复构建：只刷新 zip，不新建 Release，
-            # 也不覆盖用户自己填写的 release 说明。
             gh release upload "$TAG" "$ASSET" --clobber
-            echo "已刷新 $TAG 的运行时包（保留原有说明）"
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE"
+            echo "已更新正式版 $TAG"
           else
             gh release create "$TAG" "$ASSET" \
               --target "$SHA" \
               --title "$TITLE" \
-              --notes "$NOTES" \
-              --prerelease
-            echo "已创建新 Release $TAG"
+              --notes-file "$NOTES_FILE"
+            echo "已创建正式版 $TAG"
           fi
 
       - name: 记录本次构建到的 commit
