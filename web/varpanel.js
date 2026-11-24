@@ -180,10 +180,31 @@ const VarPanel = (() => {
 
     const valHtml = valueHtml(v);
 
+    // static 变量单独标出来：它住在 .data / .bss，不在栈上，所以永远躺在
+    // 「全局 / 静态」那一组里 —— 不标的话，用户会以为这是当前函数的局部变量
+    // 混进了全局区。
+    const staticBadge = v.scope === "static"
+      ? `<span class="var-badge static" title="${v.decl_func
+          ? esc(v.decl_func) + "() 里声明的 static：不在栈上，整个程序运行期间都活着"
+          : "静态存储：不在栈上，整个程序运行期间都活着"}">${v.decl_func
+          ? esc(v.decl_func) + " 内静态"
+          : "静态"}</span>`
+      : "";
+
+    // 变量住在哪个段：卡片上直接写 `.bss` / `.data`，这是事实；
+    // 「有没有初始化」是推断，不写。用户看到「值 12 但地址在 .bss」时，
+    // 至少能确认自己看的是哪一段，而不是以为采集错了段。
+    const segName = { data: ".data", bss: ".bss", rdata: ".rdata" }[v.storage];
+    const segTag = (segName && (v.scope === "global" || v.scope === "static"))
+      ? `<span class="var-seg" title="这个变量住在 ${segName} 段">${segName}</span>`
+      : "";
+
     let html = `
       <div class="var-head">
         <span class="var-name">${esc(v.name)}</span>
         <span class="var-type">${esc(v.type || "?")}${v.array_length ? " [" + v.array_length + "]" : ""}</span>
+        ${segTag}
+        ${staticBadge}
         ${v.initialized === false ? '<span class="var-badge uninit">未初始化</span>' : ""}
         <span class="var-addr">${v.address != null ? hex16(v.address) : "—"} · ${v.size || 0}B</span>
       </div>
@@ -250,10 +271,15 @@ const VarPanel = (() => {
           <span class="lesson-chapter">${esc(lesson.chapter)}</span>
           <span class="lesson-topic">${esc(lesson.topic)}</span>
         </div>
-        <div class="lesson-msg">${esc(lesson.message)}</div>
+        <div class="lesson-msg">${bold(esc(lesson.message))}</div>
       `;
       host.appendChild(el);
     }
+  }
+
+  /** 文案里用 **…** 标重点；直接当纯文本渲染会把星号露出来。 */
+  function bold(text) {
+    return String(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   }
 
   function basename(p) {

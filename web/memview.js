@@ -19,9 +19,9 @@ const MemView = (() => {
 
   const KIND_NAME = {
     text:   "程序段",
-    data:   "全局/静态（已初始化）",
+    data:   "全局/静态（初值非 0）",
     rdata:  "只读数据",
-    bss:    "全局/静态（未初始化）",
+    bss:    "全局/静态（初值全 0）",
     heap:   "堆",
     stack:  "栈",
   };
@@ -263,18 +263,10 @@ const MemView = (() => {
 
     const chunks = (snapshot.chunks || []).filter((c) => overlaps(c, region));
     if (chunks.length === 0) {
-      // 说清楚「为什么没有字节」，而不是笼统一句「没有内容」——
-      // 代码段本来就不在采集范围内，那是设计取舍，不是出了故障。
-      const why = {
-        text: "代码段只展示地址范围，不逐字节展开（内容是机器指令，对理解变量没有帮助）",
-        data: "这个段里的字节会在下面的「全局与静态变量」区域单独展开",
-        rdata: "只读数据（字符串常量）的字节会在它被引用时单独展开",
-        bss: "未初始化的全局变量：内容全是 0，运行后才有实际意义",
-        heap: "堆上还没有 malloc 出来的数据",
-        stack: "栈区域在程序运行后才有内容",
-      };
-      const hint = why[region.kind] || "这个区域没有采集到具体字节内容";
-      body.innerHTML = `<div class="pointer-legend">${escapeHtml(hint)}</div>`;
+      // 说清楚「为什么没有字节」，而不是笼统一句「没有内容」。
+      // .data / .bss 是重点：这两个段为什么空、变量为什么会进另一段，
+      // 初学者最容易在这里以为采集出错了。
+      body.innerHTML = `<div class="pointer-legend">${escapeHtml(emptyRegionHint(region))}</div>`;
     } else {
       for (const chunk of chunks) {
         body.appendChild(renderChunk(chunk));
@@ -283,6 +275,36 @@ const MemView = (() => {
 
     el.appendChild(body);
     return el;
+  }
+
+  /** 分区里没有字节时的一句话解释（.data / .bss 要说明分段规则）。 */
+  function emptyRegionHint(region) {
+    // 「有没有全局/静态变量」要看整张快照：某个段空着，不代表程序里没有
+    // 这类变量 —— 常见情况是变量全在另一段。
+    const anyStatic = ((snapshot && snapshot.globals) || []).length > 0;
+
+    if (region.kind === "data") {
+      if (!anyStatic) {
+        return "这个程序里还没有全局或静态变量，所以 .data 是空的。";
+      }
+      return "这段是空的：只有「初值不是全 0」的全局与静态变量才进 .data"
+        + "（非 0 初值要原样存进可执行文件）。你这些变量的初值都是 0，所以都住在 .bss。";
+    }
+    if (region.kind === "bss") {
+      if (!anyStatic) {
+        return "这个程序里还没有全局或静态变量，所以 .bss 也是空的。";
+      }
+      return "这段是空的：没有「初值全 0 / 没写初值」的全局或静态变量 —— "
+        + "它们的初值都不是 0，所以全在 .data。";
+    }
+
+    const why = {
+      text: "程序段：可执行文件里没有对应的机器指令可读（还没开始执行，或当前函数不在镜像里）",
+      rdata: "只读数据（字符串常量）的字节会在它被引用时单独展开",
+      heap: "堆上还没有 malloc 出来的数据",
+      stack: "栈区域在程序运行后才有内容",
+    };
+    return why[region.kind] || "这个区域没有采集到具体字节内容";
   }
 
   function overlaps(chunk, region) {

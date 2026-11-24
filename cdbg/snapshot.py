@@ -32,9 +32,12 @@ TEACHING_ORDER = [KIND_TEXT, KIND_DATA, KIND_RDATA, KIND_BSS, KIND_HEAP, KIND_ST
 #: 区域中文名
 KIND_LABELS = {
     KIND_TEXT: "程序段（代码）",
-    KIND_DATA: "全局与静态变量（已初始化）",
+    # 标题里直接写「为什么进这一段」的规则：这是最容易让人以为采集出错的地方
+    # （`static int c = 0;` 明明写了初始化，却住在 .bss；运行中被赋成别的值
+    # 也不会搬家 —— 段是链接期定死的，只有初值全 0 才进 .bss）。
+    KIND_DATA: "全局与静态变量（初值非 0）",
     KIND_RDATA: "只读数据（字符串常量 / const）",
-    KIND_BSS: "全局与静态变量（未初始化）",
+    KIND_BSS: "全局与静态变量（初值全 0 / 未初始化）",
     KIND_HEAP: "堆（动态分配的内存）",
     KIND_STACK: "栈（函数调用时的局部变量）",
 }
@@ -42,7 +45,8 @@ KIND_LABELS = {
 #: 存储位置在教学上的含义 —— 第 4 章「变量的存储类型」的核心
 STORAGE_EXPLAIN = {
     KIND_DATA: "自动变量不会出现在这里；这里的变量在程序启动前就已分配，生命周期到程序结束。",
-    KIND_BSS: "未初始化的全局/静态变量被操作系统清零，所以初值是 0 而不是随机值。",
+    KIND_BSS: "没写初值、或者写成 = 0 的全局/静态变量都在这里：内容全是 0，由操作系统在"
+              "加载时清零 —— 指针指向 .bss 是正常的。",
     KIND_RDATA: "字符串字面量写在这里，程序运行期间只读 —— 往这里写会崩溃。",
     KIND_TEXT: "你写的代码编译成机器指令放在这里，通常只读且可执行。",
     KIND_HEAP: "malloc 申请的内存，运行时动态分配，由程序员负责释放。",
@@ -84,6 +88,9 @@ class VarInfo:
     preview: Optional[str] = None
     #: 变量声明所在的源码行（局部变量用来判断是否已执行到赋值语句）
     decl_line: Optional[int] = None
+    #: 函数作用域的 static 变量：它是在哪个函数里声明的。
+    #: 全局变量 / 文件作用域静态变量为 None。
+    decl_func: Optional[str] = None
     #: 是否已经执行到它的初始化语句
     initialized: bool = True
     #: 诊断信息：越界、空指针、悬垂指针等
@@ -146,6 +153,10 @@ class RegionInfo:
     @property
     def size(self) -> int:
         return max(0, self.end - self.start)
+
+    def contains(self, addr: int) -> bool:
+        """地址是否落在本分区里。"""
+        return self.start <= addr < self.end
 
     def to_json(self) -> Dict[str, Any]:
         d = asdict(self)

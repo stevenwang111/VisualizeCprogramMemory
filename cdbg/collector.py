@@ -114,6 +114,9 @@ class Collector:
         # ---- 堆 ----
         snap.heap = self._build_heap(snap)
 
+        # ---- 指针目标的名字 ----
+        self._name_pointer_targets(snap)
+
         # ---- 诊断 ----
         self._diagnose(snap)
 
@@ -170,6 +173,13 @@ class Collector:
             names[:] = keep
 
         # 主 exe 的段
+        #
+        # `.data` 与 `.bss` 保持分开：这是可执行文件里**真实的样子**（两个独立
+        # 的段，中间还夹着 .rdata）。它们的区别只有一条 —— 初值是不是全 0：
+        #   初值非 0    → .data（初值要原样存进 exe 文件）
+        #   初值全 0 / 没写 → .bss（不占文件字节，加载时由系统清零）
+        # 所以 `static int c = 0;` 即使在运行中被改成 12，也仍然住在 .bss ——
+        # 段是链接期定死的。这条规则直接写进分区标题，省得用户以为采集错了。
         for sec in sections:
             kind = sec.get("kind", "data")
             if kind not in (KIND_TEXT, KIND_DATA, KIND_RDATA, KIND_BSS):
@@ -248,8 +258,10 @@ class Collector:
             return []
 
         # 排除落在 exe 段内、以及落在栈内的指针
-        exe_ranges = [(r.start, r.end) for r in snap.regions
-                      if r.kind in (KIND_TEXT, KIND_DATA, KIND_BSS, KIND_RDATA)]
+        exe_regions = [
+            r for r in snap.regions
+            if r.kind in (KIND_TEXT, KIND_DATA, KIND_BSS, KIND_RDATA)
+        ]
         stack_range = None
         for fr in snap.frames:
             if fr.low and fr.high:
@@ -258,7 +270,7 @@ class Collector:
 
         candidates = []
         for ptr in ptrs:
-            if any(lo <= ptr < hi for lo, hi in exe_ranges):
+            if any(r.contains(ptr) for r in exe_regions):
                 continue
             if stack_range and stack_range[0] <= ptr < stack_range[1]:
                 continue
@@ -336,7 +348,7 @@ class Collector:
             # 目标落在栈 / 全局区 → 那不是堆
             for reg in snap.regions:
                 if reg.kind in (KIND_STACK, KIND_DATA, KIND_BSS, KIND_RDATA):
-                    if reg.start <= v.pointer_target < reg.end:
+                    if reg.contains(v.pointer_target):
                         return
             if v.pointer_target in seen:
                 return
@@ -362,11 +374,35 @@ class Collector:
     # 诊断
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _name_pointer_targets(snap: Snapshot) -> None:
+        """给指针的指向目标补上变量名。
+
+        探针只按地址查段，所以 `int *ptr = &c;` 在界面上会写成
+        「指向 → 0x...7030 (bss)」—— 读者只看到段名，看不到那里住的是 c，
+        于是合理地怀疑「指针怎么指到 bss 去了」。这里用变量表反查一遍：
+        目标地址正好是某个变量（含函数里的 static）的起始地址，就写名字。
+        """
+        all_vars: List[VarInfo] = list(snap.globals)
+        for fr in snap.frames:
+            all_vars.extend(fr.vars)
+
+        by_addr: Dict[int, str] = {}
+        for v in all_vars:
+            if v.address is not None and v.size:
+                by_addr.setdefault(v.address, v.name)
+
+        for v in all_vars:
+            if not v.is_pointer or v.pointer_target is None:
+                continue
+            name = by_addr.get(v.pointer_target)
+            if name:
+                v.pointer_target_name = name
+
     def _diagnose(self, snap: Snapshot) -> None:
         """标注常见问题：未初始化、空指针、悬垂指针、越界。"""
         known = [
-            (r.start, r.end)
-            for r in snap.regions
+            r for r in snap.regions
             if r.kind in (KIND_STACK, KIND_DATA, KIND_BSS, KIND_RDATA, KIND_HEAP)
         ]
 
@@ -393,7 +429,7 @@ class Collector:
             if v.pointer_target == 0:
                 v.issues.append("空指针：还没有指向任何东西（NULL）")
                 return
-            inside = any(lo <= v.pointer_target < hi for lo, hi in known)
+            inside = any(reg.contains(v.pointer_target) for reg in known)
             if not inside:
                 v.issues.append(
                     "悬垂指针：它指向的地址 0x%016X 不在任何已知区域里，"
@@ -428,9 +464,15 @@ class Collector:
 
 
 def _label_of(kind: str, section_name: str) -> str:
+    """分区标题。
+
+    全局/静态变量那两个段，标题里直接写「变量为什么进这一段的规则」——
+    这是最容易被当成 bug 的地方（`static int c = 0;` 明明写了初始化，
+    却住在 .bss，而且运行中被赋成别的值也不会搬家）。
+    """
     return {
         KIND_TEXT: "程序段（代码 · %s）" % section_name,
-        KIND_DATA: "全局与静态变量（已初始化 · %s）" % section_name,
+        KIND_DATA: "全局与静态变量（初值非 0 · %s）" % section_name,
         KIND_RDATA: "只读数据（字符串常量 · %s）" % section_name,
-        KIND_BSS: "全局与静态变量（未初始化 · %s）" % section_name,
+        KIND_BSS: "全局与静态变量（初值全 0 / 未初始化 · %s）" % section_name,
     }.get(kind, kind)

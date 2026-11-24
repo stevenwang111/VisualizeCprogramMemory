@@ -23,6 +23,23 @@ def check(label, condition, detail=""):
     return bool(condition)
 
 
+def wait_for(session, predicate, timeout=4.0, step=0.05):
+    """等到快照满足条件，返回最后一次的快照。
+
+    比固定 sleep(0.5) 稳：重启后程序先在 main 停一下（监视线程会先发一份
+    入口快照），再跑到断点，机器一忙那 0.5 秒就不够 —— 断言本身没变，
+    只是把「等多久」换成「等到满足为止，最多等 timeout」。
+    """
+    deadline = time.time() + timeout
+    snap = session.snapshot
+    while time.time() < deadline:
+        snap = session.snapshot
+        if snap is not None and predicate(snap):
+            return snap
+        time.sleep(step)
+    return snap
+
+
 def test_pointer_example():
     print("\n=== ch06_pointer.c ===")
     session = DebugSession(os.path.join(EXAMPLES, "ch06_pointer.c"))
@@ -77,8 +94,7 @@ def test_pointer_example():
         ok &= check("断点已记录", 31 in session.breakpoint_lines(),
                     session.breakpoint_lines())
         session.command("restart")
-        time.sleep(0.5)
-        snap = session.snapshot
+        snap = wait_for(session, lambda s: s.current_line == 31)
         ok &= check("有断点时停在断点行", snap.current_line == 31,
                     "停在第 %d 行" % snap.current_line)
 

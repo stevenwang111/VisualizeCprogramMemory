@@ -38,10 +38,12 @@ _STORAGE_LESSONS = {
     ),
     "bss": (
         CH4,
-        "未初始化全局变量的存储位置",
-        "这个变量在 .bss 段。它和 .data 的区别只是「有没有初始值」——"
-        "未初始化的全局变量会被操作系统自动清零，所以它的值是确定的 0，"
-        "而不是随机数。这是全局变量相对局部变量的一个安全优势。",
+        "初值为 0 的变量放在 .bss",
+        "这个变量在 .bss 段。它和 .data 的区别只是「初值是不是全 0」——"
+        "没写初值、或者写成了 = 0 的全局/静态变量，编译器都放进 .bss："
+        "反正内容全是 0，没必要在可执行文件里存一份，加载时由操作系统清零。\n\n"
+        "所以「写在 .bss 里」不等于「你没初始化」，也不等于出错了。"
+        "它的值是确定的 0，而不是局部变量那种随机残留。",
     ),
     "rdata": (
         CH7,
@@ -175,8 +177,12 @@ def analyze(
     # ------------------------------------------------------------------
     # 3. 存储类型 —— 第4章
     # ------------------------------------------------------------------
+    # 函数里的 static 归下一节单独讲，这里只讲文件作用域的全局/静态变量，
+    # 免得同一件事被两段文案各说一遍、还说得不一样。
     for v in all_vars:
         storage = v.get("storage")
+        if v.get("decl_func"):
+            continue
         if storage in _STORAGE_LESSONS and v.get("scope") in ("global", "static"):
             chapter, topic, message = _STORAGE_LESSONS[storage]
             add(
@@ -187,6 +193,95 @@ def analyze(
                 [_ref(v.get("address"), v.get("name"))],
             )
             break
+
+    # ------------------------------------------------------------------
+    # 3b. 函数内的 static —— 第4章 存储类型
+    # ------------------------------------------------------------------
+    func_statics = [v for v in all_vars if v.get("decl_func") and v.get("scope") == "static"]
+    if func_statics:
+        v = func_statics[0]
+        storage_text = {
+            "data": ".data（已初始化数据段）",
+            "bss": ".bss（初值为 0，加载时由系统清零）",
+            "rdata": ".rdata（只读数据段）",
+        }.get(v.get("storage"), v.get("storage") or "?")
+        holders = [
+            p for p in all_vars
+            if p.get("is_pointer") and p.get("pointer_target") == v.get("address")
+        ]
+        msg = (
+            "%s 是在 %s() 里声明的 static 变量，但它**不住在栈上**："
+            "地址 0x%016X，落在 %s，从程序启动一直活到程序结束。\n\n"
+            "%s() 一返回，它在栈上的参数和自动变量就全被回收了，%s 却还在原处 —— "
+            "所以别的函数拿着指针照样读得到它。"
+            % (
+                v.get("name"), v.get("decl_func"), v.get("address") or 0,
+                storage_text, v.get("decl_func"), v.get("name"),
+            )
+        )
+        if holders:
+            msg += (
+                "\n\n现在就是这种情况：%s 里存着 0x%016X，指的就是它。"
+                "指针指向 .bss / .data 不是「指错了」，那正是静态变量住的地方。"
+                % (holders[0].get("name"), holders[0].get("pointer_target") or 0)
+            )
+        if v.get("storage") == "bss" and str(v.get("value") or "").strip() not in ("", "0"):
+            msg += (
+                "\n\n顺带回答一个常见疑问：它现在的值是 %s，地址却还在 .bss。"
+                "变量住在哪一段是**链接时**定死的，运行中的赋值只改内容，"
+                "不会把变量搬到 .data —— 当初进 .bss 是因为它写的是 = 0，"
+                "内容全 0 不必在可执行文件里占字节。"
+                % v.get("value")
+            )
+        msg += (
+            "\n\n记住两件事：static 只改**存储位置和生命期**，"
+            "不改**作用域** —— 名字仍然只有 %s() 里能直接用，外面只能通过指针访问。"
+            % v.get("decl_func")
+        )
+        add(
+            CH4,
+            "函数里的 static：不随函数返回而消失",
+            msg,
+            [_ref(v.get("address"), v.get("name"))]
+            + [_ref(h.get("address"), h.get("name")) for h in holders[:2]],
+        )
+
+    # ------------------------------------------------------------------
+    # 3c. 「值都改了，为什么还住在 .bss？」—— 这一节最容易被当成 bug
+    # ------------------------------------------------------------------
+    # 触发条件是真观察到的现象：变量在 .bss，但当前值已经不是 0 了。
+    # 只在标量上判断：数组/结构体的值字符串（"{1, 2}"）没法当数字比。
+    for v in all_vars:
+        if v.get("storage") != "bss" or v.get("scope") not in ("global", "static"):
+            continue
+        # 函数里的 static 由上一节讲（那边已经顺带解释了「值变了段不变」），
+        # 这里只管文件作用域的全局/静态变量。
+        if v.get("decl_func"):
+            continue
+        if v.get("is_pointer") or v.get("array_length") or not v.get("size"):
+            continue
+        try:
+            current = float(str(v.get("value") or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if current == 0:
+            continue
+        add(
+            CH4,
+            "值变了，地址还留在 .bss —— 这不是 bug",
+            "%s 现在的值是 %s，可它的地址 0x%016X 仍然在 .bss 段。\n\n"
+            "变量住在哪一段，是**链接时**就定好的：你写的是 `static int c = 0;`"
+            "（或者干脆没写初值），初值全是 0，编译器就把它安排进 .bss —— "
+            "内容全是 0，没必要在可执行文件里存一份，加载时由操作系统清零。\n\n"
+            "运行中的赋值只改这块内存里的**内容**，不会把变量搬到 .data。"
+            "所以「住在 .bss」说的是「它出生时是 0」，不代表「它现在还是 0」，"
+            "更不代表你的初始化语句没生效。\n\n"
+            "想看到住在 .data 的静态变量，把初值写成非 0 就行"
+            "（`static int c = 5;`）—— 那时它才会进 .data。"
+            % (v.get("name"), v.get("value"), v.get("address") or 0),
+            [_ref(v.get("address"), v.get("name"))],
+        )
+        break
 
     # ------------------------------------------------------------------
     # 4. 参数传值 —— 第4章

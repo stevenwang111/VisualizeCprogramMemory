@@ -23,16 +23,33 @@ from typing import List, Optional, Tuple
 
 SHIM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shim")
 
-#: 匹配用户自己定义 malloc / free 的语句（函数定义形式）
-_USER_MALLOC_DEF = re.compile(
-    r"^\s*(?:[\w\*\s]+?\s+)?\bmalloc\s*\([^;]*\)\s*\{", re.MULTILINE
-)
-_USER_FREE_DEF = re.compile(
-    r"^\s*(?:[\w\*\s]+?\s+)?\bfree\s*\([^;]*\)\s*\{", re.MULTILINE
-)
-
 #: 匹配 #include 指令
 _INCLUDE_RE = re.compile(r"^\s*#\s*include\b", re.MULTILINE)
+
+#: 匹配用户自己定义 malloc / free 的语句（函数定义形式）。
+#:
+#: 函数头与 `{` 之间**允许换行**：`void *malloc(size_t n)\n{` 这种写法很常见，
+#: 以前只在同一行找 `{`，于是漏判 —— 插桩仍然插进去，宏把用户自己的定义
+#: 也改写掉，编译必然失败，只能靠「编译失败就降级」兜底（多花一次编译，
+#: 还会在提示里出现一句让人担心的“编译失败”）。这里提前认出来，直接跳过插桩。
+#:
+#: `[^;{}()]*` 卡在参数列表里，保证 `void *malloc(size_t);` 这种声明不会被当成
+#: 定义；`)` 与 `{` 之间只允许空白，所以 `if (malloc(8)) {` 这类调用也不会误判。
+_USER_MALLOC_DEF = re.compile(
+    r"^[^\n#]*\bmalloc\s*\([^;{}()]*\)[^\S\n]*(?:\n\s*)?\{", re.MULTILINE
+)
+_USER_FREE_DEF = re.compile(
+    r"^[^\n#]*\bfree\s*\([^;{}()]*\)[^\S\n]*(?:\n\s*)?\{", re.MULTILINE
+)
+
+#: 用户用**宏**把堆函数指到别处（`#define malloc my_alloc`）。
+#:
+#: 这种写法必须一并认出来：shim 里的同名宏定义在用户之后，会直接顶掉用户的宏
+#: （只是 "macro redefined" 警告，编译能过），用户自己的分配器就再也不会被调用 ——
+#: 那是真真切切改了程序行为，比「漏记」严重得多。
+_USER_HEAP_MACRO = re.compile(
+    r"^[ \t]*#[ \t]*define[ \t]+(?:malloc|calloc|realloc|free)\b", re.MULTILINE
+)
 
 #: 匹配真正 include 了 shim 的语句。
 #: 必须锚定行首的 #include —— 否则注释里提到 "cdbg_shim.h" 也会被误判。
@@ -97,8 +114,12 @@ def instrument_text(text: str) -> InstrumentResult:
     """对源码文本做插桩。"""
     notes: List[str] = []
 
-    # ---- 安全检查 1：用户自己定义了堆函数 ----
-    if _USER_MALLOC_DEF.search(text) or _USER_FREE_DEF.search(text):
+    # ---- 安全检查 1：用户自己定义了堆函数（函数形式或宏形式）----
+    if (
+        _USER_MALLOC_DEF.search(text)
+        or _USER_FREE_DEF.search(text)
+        or _USER_HEAP_MACRO.search(text)
+    ):
         return InstrumentResult(
             ok=False,
             text=text,
